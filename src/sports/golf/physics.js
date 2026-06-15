@@ -97,6 +97,27 @@ export function createPhysics() {
     wind.vec.set(Math.sin(dir) * speed, 0, Math.cos(dir) * speed);
   }
 
+  // Green-slope state (set per-hole or when the ball enters the green). (ax, az) is the
+  // acceleration vector (m/s^2) in world XZ — ~0.3 for a typical 3% green grade. Applied
+  // only when the ball is rolling slowly on the ground so it doesn't shove an airborne ball.
+  const slope = { ax: 0, az: 0 };
+  const _slopeForce = new CANNON.Vec3();
+  function setGreenSlope({ ax = 0, az = 0 } = {}) {
+    slope.ax = ax;
+    slope.az = az;
+  }
+  function applyGreenSlope() {
+    if (ball.sleepState === CANNON.Body.SLEEPING) return;
+    if (slope.ax === 0 && slope.az === 0) return;
+    const v = ball.velocity;
+    const onGround = ball.position.y < BALL_RADIUS * 3;
+    const slow = v.length() < 4; // only break the putt when speed is reasonable
+    if (!onGround || !slow) return;
+    const k = BALL_MASS * 0.6;
+    _slopeForce.set(slope.ax * k, 0, slope.az * k);
+    ball.applyForce(_slopeForce, ball.position);
+  }
+
   // Per-step aerodynamics on the ball.
   const _drag = new CANNON.Vec3();
   const _vRel = new CANNON.Vec3();
@@ -138,6 +159,7 @@ export function createPhysics() {
     let steps = 0;
     while (accumulator >= FIXED_DT && steps < MAX_SUBSTEPS) {
       applyAerodynamics();
+      applyGreenSlope();
       world.step(FIXED_DT);
       accumulator -= FIXED_DT;
       steps += 1;
@@ -159,6 +181,7 @@ export function createPhysics() {
     addStaticMesh,
     removeStaticBodies,
     setWind,
+    setGreenSlope,
     step,
     dispose,
     BALL_RADIUS,
