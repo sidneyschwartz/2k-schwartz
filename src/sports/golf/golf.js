@@ -652,10 +652,10 @@ export function mountGolf(host, configOrOnExit) {
     getClubs: () => clubs,                  // legacy alias for fallback HUD
     getScorecard: () => game.scorecard,
     getLie: () => {
-      // Prefer the engine's classifier when wired; otherwise infer from holeData regions.
-      if (typeof controller !== 'undefined' && typeof controller?.getLie === 'function') {
-        try { return controller.getLie(); } catch {}
-      }
+      // game.lie is authoritative (set on settle). Referencing the `controller` const
+      // here threw a TDZ "Cannot access 'controller' before initialization" on the first
+      // HUD frame (it's defined later in mountGolf). Use game.lie directly.
+      if (game.lie) return game.lie;
       const bp = physics.ball.position;
       return inferLieFromHole(game.holeData, bp.x, bp.z);
     },
