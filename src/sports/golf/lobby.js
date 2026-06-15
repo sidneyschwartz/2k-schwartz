@@ -4,6 +4,7 @@
 // showLobby(host) -> Promise<{ mode: 'single'|'host'|'join', code?: string, character }>
 
 import { showCharacterSelect } from './character-select.js';
+import { listAiPersonas, listDifficulties } from './ai.js';
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
@@ -30,6 +31,11 @@ export function showLobby(host) {
               <div class="mode-tile__name">Solo round</div>
               <div class="mode-tile__sub">Practice — 3 holes, just you</div>
             </button>
+            <button class="mode-tile" data-mode="cpu">
+              <div class="mode-tile__icon">&#129302;</div>
+              <div class="mode-tile__name">Vs CPU</div>
+              <div class="mode-tile__sub">Pick an opponent and difficulty</div>
+            </button>
             <button class="mode-tile mode-tile--primary" data-mode="host">
               <div class="mode-tile__icon">&#127942;</div>
               <div class="mode-tile__name">Host a match</div>
@@ -51,6 +57,7 @@ export function showLobby(host) {
     let chosenMode = null;
     let chosenCode = null;
     let chosenChar = null;
+    let chosenCpu = null; // { personaId, difficulty } when mode === 'single'
 
     function exit() {
       screen.remove();
@@ -62,13 +69,86 @@ export function showLobby(host) {
       body.innerHTML = '';
       showCharacterSelect(body).then((ch) => {
         chosenChar = ch;
-        finish();
+        if (chosenMode === 'cpu') goToCpuSelect();
+        else finish();
       });
+    }
+
+    function goToCpuSelect() {
+      const personas = listAiPersonas();
+      // Default to a CPU persona other than the player's pick when possible.
+      const defaultIdx = Math.max(0, personas.findIndex((p) => p.characterId !== chosenChar?.id));
+      chosenCpu = {
+        personaId: personas[defaultIdx].id,
+        difficulty: personas[defaultIdx].defaultDifficulty,
+      };
+      body.innerHTML = `
+        <div class="lobby-step lobby-step--cpu" style="color:#f5f5f7;font-family:system-ui;display:flex;flex-direction:column;align-items:center;gap:18px;">
+          <h3 class="lobby-step__title" style="font-size:24px;font-weight:800;margin:6px 0 4px;">Choose your opponent</h3>
+          <p class="lobby-step__hint" style="color:#aab6d0;font-size:14px;margin:0;">You'll alternate holes. Lowest total wins.</p>
+          <div class="cpu-grid" style="display:flex;gap:18px;flex-wrap:wrap;justify-content:center;">
+            ${personas.map((p) => `
+              <button class="cpu-card" data-persona="${p.id}" style="
+                width:180px;padding:14px;border-radius:14px;border:2px solid rgba(255,255,255,0.10);
+                background:linear-gradient(160deg,rgba(255,255,255,0.07),rgba(255,255,255,0.02));
+                color:inherit;text-align:center;cursor:pointer;display:flex;flex-direction:column;gap:6px;">
+                <div style="font-size:18px;font-weight:700;">${p.name}</div>
+                <div style="font-size:11px;color:#aab6d0;letter-spacing:0.06em;">${p.characterId.toUpperCase()}</div>
+              </button>
+            `).join('')}
+          </div>
+          <div class="diff-row" style="display:flex;gap:8px;margin-top:6px;">
+            ${listDifficulties().map((d) => `
+              <button class="diff-tile" data-diff="${d.id}" style="
+                padding:8px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.10);
+                background:rgba(255,255,255,0.04);color:inherit;cursor:pointer;font-weight:600;">
+                ${d.label}
+              </button>
+            `).join('')}
+          </div>
+          <div class="lobby-step__actions" style="display:flex;gap:12px;margin-top:10px;">
+            <button class="btn ghost" data-action="back" style="background:transparent;color:#aab6d0;border:0;cursor:pointer;padding:8px 14px;">&larr; back</button>
+            <button class="btn btn--primary" data-action="next" style="background:#ffd24a;color:#221b00;border:0;border-radius:8px;padding:10px 20px;font-weight:700;cursor:pointer;">Tee off &rarr;</button>
+          </div>
+        </div>
+      `;
+      function refresh() {
+        body.querySelectorAll('.cpu-card').forEach((el) => {
+          el.style.borderColor = el.dataset.persona === chosenCpu.personaId
+            ? '#ffd24a' : 'rgba(255,255,255,0.10)';
+          el.style.transform = el.dataset.persona === chosenCpu.personaId ? 'translateY(-3px)' : '';
+        });
+        body.querySelectorAll('.diff-tile').forEach((el) => {
+          const sel = el.dataset.diff === chosenCpu.difficulty;
+          el.style.background = sel ? '#ffd24a' : 'rgba(255,255,255,0.04)';
+          el.style.color = sel ? '#221b00' : 'inherit';
+        });
+      }
+      body.querySelectorAll('.cpu-card').forEach((el) => {
+        el.addEventListener('click', () => {
+          chosenCpu.personaId = el.dataset.persona;
+          refresh();
+        });
+      });
+      body.querySelectorAll('.diff-tile').forEach((el) => {
+        el.addEventListener('click', () => {
+          chosenCpu.difficulty = el.dataset.diff;
+          refresh();
+        });
+      });
+      body.querySelector('[data-action="back"]').addEventListener('click', goToCharacter);
+      body.querySelector('[data-action="next"]').addEventListener('click', finish);
+      refresh();
     }
 
     function finish() {
       screen.remove();
-      resolve({ mode: chosenMode, code: chosenCode || undefined, character: chosenChar });
+      resolve({
+        mode: chosenMode,
+        code: chosenCode || undefined,
+        character: chosenChar,
+        cpu: chosenMode === 'cpu' ? chosenCpu : undefined,
+      });
     }
 
     function goToHostCode() {
@@ -142,6 +222,11 @@ export function showLobby(host) {
             <div class="mode-tile__name">Solo round</div>
             <div class="mode-tile__sub">Practice — 3 holes, just you</div>
           </button>
+          <button class="mode-tile" data-mode="cpu">
+            <div class="mode-tile__icon">&#129302;</div>
+            <div class="mode-tile__name">Vs CPU</div>
+            <div class="mode-tile__sub">Pick an opponent and difficulty</div>
+          </button>
           <button class="mode-tile mode-tile--primary" data-mode="host">
             <div class="mode-tile__icon">&#127942;</div>
             <div class="mode-tile__name">Host a match</div>
@@ -161,7 +246,7 @@ export function showLobby(host) {
       body.querySelectorAll('.mode-tile').forEach((tile) => {
         tile.addEventListener('click', () => {
           chosenMode = tile.dataset.mode;
-          if (chosenMode === 'single') goToCharacter();
+          if (chosenMode === 'single' || chosenMode === 'cpu') goToCharacter();
           else if (chosenMode === 'host') goToHostCode();
           else if (chosenMode === 'join') goToJoinCode();
         });

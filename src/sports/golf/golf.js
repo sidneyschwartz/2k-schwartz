@@ -18,6 +18,9 @@ import { buildHole } from './course/terrain.js';
 import { createAiGolfer, AI_PERSONAS } from './ai.js';
 import { createAudio, clubHitName } from './audio.js';
 import { divotSpray, ballTrail, splashEffect } from './vfx.js';
+import { mountMinimap } from './minimap.js';
+import { mountSettings, loadSettings } from './settings.js';
+import { showRoundSummary } from './round-summary.js';
 
 const HOLE_RADIUS = 0.108;        // real golf hole radius (m)
 
@@ -56,13 +59,13 @@ export function mountGolf(host, configOrOnExit) {
   else if (configOrOnExit && typeof configOrOnExit === 'object') _cfg = configOrOnExit;
   const { mode = 'single', code = null, character = null, cpu = null, onExit } = _cfg;
   const isMultiplayer = mode === 'host' || mode === 'join';
-  const hasCpu = mode === 'single' && !!cpu;
+  const hasCpu = mode === 'cpu' && !!cpu;
 
   host.innerHTML = '';
   host.style.position = 'relative';
 
   // ---- Scene ----
-  const { scene, camera, renderer, followBall, dispose: disposeScene } = createScene(host);
+  const { scene, camera, renderer, followBall, dispose: disposeScene, camState } = createScene(host);
 
   // ---- Physics ----
   const physics = createPhysics();
@@ -99,6 +102,8 @@ export function mountGolf(host, configOrOnExit) {
     strokes: 0,
     complete: false,
     inFlight: false,
+    paused: false,
+    aimLineEnabled: true,
     wind: { speed: 0, dir: 0, dirDeg: 0 },
     flightStart: 0,
     settleTimer: 0,
@@ -166,6 +171,7 @@ export function mountGolf(host, configOrOnExit) {
     game.holeName = data.name;
     game.holeData = data;
     if (game.scorecard) game.scorecard.currentHole = data.number;
+    if (ai) ai.holeData = data;
     placeBallOnTee();
   }
 
@@ -403,7 +409,72 @@ export function mountGolf(host, configOrOnExit) {
   resetBtn.style.cssText = 'background:#6cf;color:#001;border:0;border-radius:8px;padding:6px 12px;cursor:pointer;display:none;';
   resetBtn.addEventListener('click', resetHole);
   overlay.appendChild(resetBtn);
+
+  const settingsBtn = document.createElement('button');
+  settingsBtn.className = 'golf-iconbtn';
+  settingsBtn.setAttribute('aria-label', 'Settings (P)');
+  settingsBtn.title = 'Settings (P)';
+  settingsBtn.innerHTML = '&#9881;';
+  settingsBtn.addEventListener('click', () => settingsUi?.toggle());
+  overlay.appendChild(settingsBtn);
+
+  const mapBtn = document.createElement('button');
+  mapBtn.className = 'golf-iconbtn';
+  mapBtn.setAttribute('aria-label', 'Toggle map (M)');
+  mapBtn.title = 'Toggle map (M)';
+  mapBtn.innerHTML = '&#128506;';
+  mapBtn.addEventListener('click', () => minimap?.toggle());
+  overlay.appendChild(mapBtn);
+
+  const replayBtn = document.createElement('button');
+  replayBtn.className = 'golf-iconbtn golf-iconbtn--replay';
+  replayBtn.setAttribute('aria-label', 'Replay last shot');
+  replayBtn.title = 'Replay last shot';
+  replayBtn.innerHTML = '&#9654;';
+  replayBtn.style.display = 'none';
+  replayBtn.addEventListener('click', () => { replayLastShot(); });
+  overlay.appendChild(replayBtn);
+
   host.appendChild(overlay);
+
+  // ---- Minimap ----
+  let minimap = null;
+  try {
+    minimap = mountMinimap(host, {
+      getHoleData: () => game.holeData,
+      getBallPos: () => {
+        const p = physics.ball.position;
+        return { x: p.x, y: p.y, z: p.z };
+      },
+    });
+  } catch (err) {
+    console.warn('[golf] minimap failed to mount', err);
+  }
+
+  // ---- Settings + pause ----
+  const persisted = loadSettings();
+  let settingsUi = null;
+  try {
+    settingsUi = mountSettings({
+      host,
+      onClose: () => { game.paused = false; },
+      onResumeGame: () => { game.paused = false; },
+      onResetHole: resetHole,
+      onExitToMenu: () => onExit?.(),
+      onSetMuted: (m) => { try { audio.setMuted(m); } catch {} },
+      onSetCameraOffset: (d) => { if (camState) camState.distance = d; },
+      onSetMinimapVisible: (v) => minimap?.setVisible(v),
+      onSetAimLineVisible: (v) => { game.aimLineEnabled = !!v; },
+    });
+  } catch (err) {
+    console.warn('[golf] settings failed to mount', err);
+  }
+
+  // Apply persisted settings on boot.
+  game.aimLineEnabled = persisted.aimLine;
+  if (camState) camState.distance = persisted.cameraDistance;
+  if (persisted.muted) { try { audio.setMuted(true); } catch {} }
+  minimap?.setVisible(persisted.minimap);
 
   const completeBanner = document.createElement('div');
   completeBanner.style.cssText = `
@@ -427,7 +498,10 @@ export function mountGolf(host, configOrOnExit) {
   function onHoleComplete() {
     // Record locally (multiplayer scorecard updates also come from server).
     if (game.scorecard) {
-      const slot = isMultiplayer ? game.mySlot : 0;
+      let slot;
+      if (isMultiplayer) slot = game.mySlot;
+      else if (hasCpu && game.cpuPhase === 'cpu') slot = 1;
+      else slot = 0;
       const me = game.scorecard.players[slot];
       if (me) me.scores[game.hole - 1] = game.strokes;
     }
@@ -440,7 +514,21 @@ export function mountGolf(host, configOrOnExit) {
       }
       return;
     }
-    // Single-player: auto-advance to next hole after a short delay.
+    // Single-player vs CPU: after the player finishes, the CPU plays the same hole.
+    if (hasCpu && game.cpuPhase === 'player') {
+      setTimeout(() => {
+        if (stopped) return;
+        game.cpuPhase = 'cpu';
+        game.strokes = 0;
+        game.complete = false;
+        completeBanner.style.display = 'none';
+        resetBtn.style.display = 'none';
+        placeBallOnTee();
+        scheduleCpuShot();
+      }, 1600);
+      return;
+    }
+    // Either solo (no CPU) or CPU just finished this hole — advance to next.
     if (game.hole < game.holeCount) {
       setTimeout(() => {
         if (stopped) return;
@@ -449,25 +537,76 @@ export function mountGolf(host, configOrOnExit) {
         game.complete = false;
         completeBanner.style.display = 'none';
         resetBtn.style.display = 'none';
+        if (hasCpu) game.cpuPhase = 'player';
         loadHole(next);
+        if (ai) ai.holeData = game.holeData;
         swing.reset();
       }, 1800);
+    } else if (hasCpu) {
+      // Final hole done — show match-complete banner.
+      const totals = game.scorecard.players.map((p) =>
+        p.scores.reduce((a, b) => a + (b || 0), 0));
+      const youTotal = totals[0];
+      const cpuTotal = totals[1];
+      const verdict = youTotal < cpuTotal ? 'You win!'
+        : youTotal > cpuTotal ? `${game.aiName} wins.` : 'Tied.';
+      setTimeout(() => {
+        if (stopped) return;
+        completeBanner.innerHTML = `<div>Match complete</div>
+          <div style="margin-top:8px;font-size:1rem;opacity:0.9;">
+            You: ${youTotal} &nbsp;·&nbsp; ${game.aiName}: ${cpuTotal}
+          </div>
+          <div style="margin-top:6px;font-size:1.2rem;">${verdict}</div>`;
+        completeBanner.style.display = 'block';
+      }, 1200);
     }
+  }
+
+  // ---- CPU turn machinery (single-player vs CPU) ----
+  // The CPU plans a shot, builds a synthetic onShot payload (matching the human swing
+  // controller's shape) and feeds it into launchShot. After the ball settles, if the
+  // hole isn't complete, plan the next CPU shot.
+  function scheduleCpuShot() {
+    if (!ai || game.cpuPhase !== 'cpu' || game.complete) return;
+    // Update ai's hole reference each shot so wind/pin reflect current state.
+    ai.holeData = game.holeData;
+    setTimeout(() => {
+      if (stopped || game.cpuPhase !== 'cpu' || game.complete || game.inFlight) return;
+      const ballPos = physics.ball.position;
+      const shot = ai.planShot({
+        ballPos: { x: ballPos.x, y: ballPos.y, z: ballPos.z },
+        wind: game.wind,
+      });
+      launchShot({
+        club: shot.club,
+        power: shot.power,
+        accuracyError: shot.accuracyError,
+        aimYaw: shot.aimYaw,
+        stance: { x: 0, y: 0 },
+      });
+    }, 900);
   }
 
   // Called when the ball settles (after a shot stops moving).
   function onBallSettled(bp) {
+    // Replay buffer is finalized when the shot ends.
+    replay.available = replay.frames.length > 0 && !!replay.start;
+
     if (isMultiplayer && net && game.localActive) {
       net.sendShotResult({
         endPos: [bp.x, bp.y, bp.z],
         strokes: game.strokes,
       });
-      // If the hole isn't complete yet, end turn. Hole-complete handler below also calls notify.
       if (!game.complete) {
         net.endTurn();
         game.localActive = false;
         showHudToast?.("Opponent's turn");
       }
+      return;
+    }
+    // CPU: if it's the CPU's turn and the hole isn't done, schedule another CPU shot.
+    if (hasCpu && game.cpuPhase === 'cpu' && !game.complete) {
+      scheduleCpuShot();
     }
   }
 
@@ -555,8 +694,25 @@ export function mountGolf(host, configOrOnExit) {
     last = now;
     const dt = Math.min(0.05, dtMs / 1000);
 
+    // Replay button visibility tracks replay availability and idle state.
+    if (replayBtn) {
+      const show = replay.available && !replay.playing && !game.inFlight;
+      replayBtn.style.display = show ? 'inline-block' : 'none';
+    }
+
+    if (game.paused) {
+      // Render the static frame so the scene stays visible behind the settings overlay.
+      renderer.render(scene, camera);
+      return;
+    }
+
     swing.update(dt);
-    physics.step(dt);
+    if (!replay.playing) {
+      physics.step(dt);
+      captureReplayFrame();
+    } else {
+      advanceReplay(now);
+    }
 
     // Sync ball mesh
     const bp = physics.ball.position;
@@ -564,8 +720,8 @@ export function mountGolf(host, configOrOnExit) {
     const bq = physics.ball.quaternion;
     ballMesh.quaternion.set(bq.x, bq.y, bq.z, bq.w);
 
-    // Aim line — only while idle
-    if (swing.state.phase === 'idle' && !game.inFlight && !game.complete) {
+    // Aim line — only while idle, and only when enabled in settings.
+    if (game.aimLineEnabled && swing.state.phase === 'idle' && !game.inFlight && !game.complete) {
       const toPinX = pinWorld.x - bp.x;
       const toPinZ = pinWorld.z - bp.z;
       const baseYaw = Math.atan2(toPinX, toPinZ);
@@ -582,8 +738,8 @@ export function mountGolf(host, configOrOnExit) {
       aimLine.visible = false;
     }
 
-    // Settle / in-flight detection
-    if (game.inFlight) {
+    // Settle / in-flight detection (skipped during replay since we manually drive the ball)
+    if (game.inFlight && !replay.playing) {
       const speed = physics.ball.velocity.length();
       // Rolling-ball SFX gain follows ground speed (only while near the ground).
       const onGround = bp.y < physics.BALL_RADIUS * 3;
@@ -626,7 +782,7 @@ export function mountGolf(host, configOrOnExit) {
     // its vertical speed is below 2 m/s, count it as holed and snap-stop. This catches
     // both rolling putts and gentle landings near the cup without requiring exact
     // sphere/sensor body math.
-    if (!game.complete) {
+    if (!game.complete && !replay.playing) {
       const dx = bp.x - pinWorld.x;
       const dz = bp.z - pinWorld.z;
       const distXZ = Math.sqrt(dx * dx + dz * dz);
@@ -675,6 +831,8 @@ export function mountGolf(host, configOrOnExit) {
     notifyHoleComplete(strokes) { net?.sendHoleComplete(strokes); },
     nextHole() { net?.nextHole(); },
     endTurn() { net?.endTurn(); },
+    replayLastShot() { return replayLastShot(); },
+    canReplay() { return replay.available && !replay.playing; },
   };
   host._golfController = controller;
 
@@ -683,6 +841,7 @@ export function mountGolf(host, configOrOnExit) {
     stopped = true;
     cancelAnimationFrame(rafId);
     swing.detach(window);
+    window.removeEventListener('keydown', onReplayKey);
     try { unmountHud?.(); } catch {}
     try { net?.close(); } catch {}
     try { activeTerrain?.dispose(); } catch {}
