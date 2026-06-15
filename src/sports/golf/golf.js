@@ -1298,6 +1298,30 @@ export function mountGolf(host, configOrOnExit) {
     setMinimapVisible(b) { minimap?.setVisible(b); },
     setAimLineVisible(b) { game.aimLineEnabled = !!b; },
     openSettings() { game.paused = true; settingsUi?.open(); },
+    // ---- Test/debug hooks (used by tests/playthrough.mjs) ----
+    _debugShoot({ power = 0.7, aimYaw = 0 } = {}) {
+      launchShot({ club: swing.club, power, accuracyError: 0, aimYaw, stance: { x: 0, y: 0 } });
+    },
+    _debugSink() {
+      // Drop the ball straight into the cup at low speed to trigger the hole-out path.
+      physics.ball.velocity.set(0, 0, 0);
+      physics.ball.angularVelocity.set(0, 0, 0);
+      physics.ball.position.set(pinWorld.x, pinWorld.y + physics.BALL_RADIUS, pinWorld.z);
+      physics.markSafePos?.(pinWorld.x, pinWorld.y + physics.BALL_RADIUS, pinWorld.z);
+      physics.ball.wakeUp();
+      game.inFlight = true; // let the cup sensor catch it on the next frames
+    },
+    _state() {
+      const p = physics.ball.position;
+      const c = camera.position;
+      return {
+        hole: game.hole, strokes: game.strokes, complete: game.complete,
+        inFlight: game.inFlight, flying: game.flying, lie: game.lie,
+        ball: { x: p.x, y: p.y, z: p.z },
+        cam: { x: c.x, y: c.y, z: c.z },
+        finite: [p.x, p.y, p.z, c.x, c.y, c.z].every(Number.isFinite),
+      };
+    },
   };
   host._golfController = controller;
 
