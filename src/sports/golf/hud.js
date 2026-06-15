@@ -47,6 +47,8 @@ export function mountHud(host, getters = {}) {
     getHole = () => 1,
     getPar = () => 4,
     getScorecard = () => null,
+    getLie = () => null,                  // 'tee'|'fairway'|'rough'|'sand'|'green'|'water'|'oob'
+    getLastShotStats = () => null,        // { carry, total, apex, ballSpeed, offline } or null
     onSelectClub = null, // optional: HUD can call this to change club
   } = getters;
 
@@ -62,6 +64,10 @@ export function mountHud(host, getters = {}) {
       <div class="golf-hud__panel golf-hud__strokes">
         <div class="golf-hud__label">STROKES</div>
         <div class="golf-hud__strokes-num" data-hud="strokes">0</div>
+      </div>
+      <div class="golf-hud__panel golf-hud__lie" data-hud="lie-panel" hidden>
+        <div class="golf-hud__label">LIE</div>
+        <div class="golf-hud__lie-name" data-hud="lie-name">—</div>
       </div>
       <div class="golf-hud__panel golf-hud__wind">
         <div class="golf-hud__label">WIND</div>
@@ -110,6 +116,17 @@ export function mountHud(host, getters = {}) {
       <div class="golf-hud__sc-title">Scorecard</div>
       <table class="golf-hud__sc-table" data-hud="sc-table"></table>
     </div>
+
+    <div class="golf-hud__stats" data-hud="stats">
+      <div class="golf-hud__stats-title">Shot</div>
+      <dl class="golf-hud__stats-grid">
+        <dt>Carry</dt><dd><span data-hud="stat-carry">—</span></dd>
+        <dt>Total</dt><dd><span data-hud="stat-total">—</span></dd>
+        <dt>Apex</dt><dd><span data-hud="stat-apex">—</span></dd>
+        <dt>Ball speed</dt><dd><span data-hud="stat-speed">—</span></dd>
+        <dt>Offline</dt><dd><span data-hud="stat-offline">—</span></dd>
+      </dl>
+    </div>
   `;
   host.appendChild(root);
 
@@ -130,6 +147,14 @@ export function mountHud(host, getters = {}) {
     scTable: root.querySelector('[data-hud="sc-table"]'),
     turnbar: root.querySelector('[data-hud="turnbar"]'),
     turnText: root.querySelector('[data-hud="turn-text"]'),
+    liePanel: root.querySelector('[data-hud="lie-panel"]'),
+    lieName: root.querySelector('[data-hud="lie-name"]'),
+    stats: root.querySelector('[data-hud="stats"]'),
+    statCarry: root.querySelector('[data-hud="stat-carry"]'),
+    statTotal: root.querySelector('[data-hud="stat-total"]'),
+    statApex: root.querySelector('[data-hud="stat-apex"]'),
+    statSpeed: root.querySelector('[data-hud="stat-speed"]'),
+    statOffline: root.querySelector('[data-hud="stat-offline"]'),
   };
 
   // Club picker buttons (optional — falls back to keys if no onSelectClub)
@@ -152,6 +177,9 @@ export function mountHud(host, getters = {}) {
     clubName: null, clubCarry: null,
     scorecardHash: null,
     turn: null,
+    lie: null,
+    statsRef: null,        // identity check for stats object (replaced on new shot)
+    statsShownAt: 0,       // performance.now() when the card became visible
   };
 
   let raf = 0;
@@ -256,6 +284,48 @@ export function mountHud(host, getters = {}) {
       last.scorecardHash = null;
     }
 
+    // Lie
+    const lie = getLie();
+    if (lie !== last.lie) {
+      if (lie) {
+        els.liePanel.hidden = false;
+        els.lieName.textContent = lie === 'oob' ? 'OB' : lie;
+        els.lieName.className = 'golf-hud__lie-name golf-hud__lie--' + lie;
+      } else {
+        els.liePanel.hidden = true;
+      }
+      last.lie = lie;
+    }
+
+    // Post-shot stats card: appears 0.5s after a new stats object lands, sticks for 4s.
+    const stats = getLastShotStats();
+    const now = performance.now();
+    if (stats !== last.statsRef) {
+      // New shot stats — populate fields immediately and schedule the show.
+      if (stats) {
+        els.statCarry.textContent = formatDistance(stats.carry);
+        els.statTotal.textContent = formatDistance(stats.total);
+        els.statApex.textContent = formatDistance(stats.apex, 'apex');
+        els.statSpeed.textContent = stats.ballSpeed != null
+          ? Math.round(stats.ballSpeed) + ' m/s' : '—';
+        els.statOffline.textContent = formatOffline(stats.offline);
+        last.statsShownAt = now + 500; // 0.5s delay before show
+      } else {
+        els.stats.classList.remove('golf-hud__stats--show');
+        last.statsShownAt = 0;
+      }
+      last.statsRef = stats;
+    }
+    if (stats && last.statsShownAt > 0) {
+      const showing = els.stats.classList.contains('golf-hud__stats--show');
+      if (!showing && now >= last.statsShownAt) {
+        els.stats.classList.add('golf-hud__stats--show');
+      } else if (showing && now >= last.statsShownAt + 4500) {
+        els.stats.classList.remove('golf-hud__stats--show');
+        last.statsShownAt = 0;
+      }
+    }
+
     raf = requestAnimationFrame(tick);
   }
   raf = requestAnimationFrame(tick);
@@ -323,4 +393,15 @@ function renderScorecard(table, sc) {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function formatDistance(m) {
+  if (m == null || !Number.isFinite(m)) return '—';
+  return Math.round(m) + ' m';
+}
+function formatOffline(m) {
+  if (m == null || !Number.isFinite(m)) return '—';
+  if (Math.abs(m) < 0.5) return '0 m';
+  const dir = m > 0 ? 'R' : 'L';
+  return Math.round(Math.abs(m)) + ' m ' + dir;
 }
