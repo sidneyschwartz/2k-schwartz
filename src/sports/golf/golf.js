@@ -1324,6 +1324,12 @@ export function mountGolf(host, configOrOnExit) {
         });
       } catch {}
     }
+    // Slide the shadow camera with the ball so long par-5 shots still cast
+    // crisp shadows. setSunTarget moves both the light's target AND its world
+    // position so the shadow camera matrix tracks correctly.
+    if (visuals?.setSunTarget) {
+      try { visuals.setSunTarget(bp.x, bp.z); } catch {}
+    }
 
     // Cup sensor: when ball center is within HOLE_RADIUS * 1.5 in XZ of the pin AND
     // its vertical speed is below 2 m/s, count it as holed and snap-stop. This catches

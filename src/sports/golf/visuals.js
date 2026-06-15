@@ -1,6 +1,6 @@
 // Visual polish: procedural sky, IBL via PMREM (image-based PBR lighting +
 // reflections sourced from the sky itself — no HDRI download needed),
-// ACES tonemapping, bloom, SSAO, SMAA, shadow tuning.
+// ACES tonemapping, bloom, SSAO, SMAA, shadow tuning, color grading.
 
 import * as THREE from 'three';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
@@ -9,12 +9,76 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
 // Sun config used by both sky and directional light so they agree.
 const SUN_ELEVATION_DEG = 28;   // mid-morning
 const SUN_AZIMUTH_DEG = 135;
 const SUN_DISTANCE = 450;
+
+// ---- Color grading shader ----
+// Tuned for a "PGA Tour broadcast" look: gentle shadow lift, slightly warm
+// midtones, subtle saturation boost. Cheap to compute (one full-screen pass).
+const ColorGradeShader = {
+  uniforms: {
+    tDiffuse:    { value: null },
+    uShadowLift: { value: 0.008 },    // very subtle floor raise
+    uMidWarm:    { value: 0.015 },    // gentle warmth in midtones (sunlit feel)
+    uSaturation: { value: 1.08 },     // mild saturation pop
+    uContrast:   { value: 1.04 },     // gentle S-curve
+    uVignette:   { value: 0.12 },     // soft edge darkening
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uShadowLift;
+    uniform float uMidWarm;
+    uniform float uSaturation;
+    uniform float uContrast;
+    uniform float uVignette;
+    varying vec2 vUv;
+
+    vec3 saturation(vec3 c, float s) {
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      return mix(vec3(l), c, s);
+    }
+    vec3 contrast(vec3 c, float k) {
+      return (c - 0.5) * k + 0.5;
+    }
+
+    void main() {
+      vec4 src = texture2D(tDiffuse, vUv);
+      vec3 c = src.rgb;
+
+      // Lift shadows so deep greens never crush to black.
+      c = c + uShadowLift * (1.0 - c);
+
+      // Warm midtones: subtle bias to R/G centered around 0.5 luminance.
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      float midMask = 1.0 - abs(l - 0.5) * 2.0;
+      c.r += uMidWarm * midMask;
+      c.g += uMidWarm * 0.5 * midMask;
+
+      // Saturation + gentle contrast curve.
+      c = saturation(c, uSaturation);
+      c = contrast(c, uContrast);
+
+      // Soft vignette.
+      vec2 d = vUv - 0.5;
+      float v = smoothstep(0.85, 0.30, dot(d, d) * 4.0); // 1 at center, 0 at corners
+      c *= mix(1.0 - uVignette, 1.0, v);
+
+      gl_FragColor = vec4(clamp(c, 0.0, 1.0), src.a);
+    }
+  `,
+};
 
 function sunVector() {
   const phi = THREE.MathUtils.degToRad(90 - SUN_ELEVATION_DEG);
@@ -127,6 +191,7 @@ export function applyVisuals(scene, renderer, camera = null) {
   let bloomPass = null;
   let smaaPass = null;
   let ssaoPass = null;
+  let gradePass = null;
   const size = renderer.getSize(new THREE.Vector2());
 
   if (camera) {
@@ -150,6 +215,13 @@ export function applyVisuals(scene, renderer, camera = null) {
     bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.12, 0.7, 0.92);
     composer.addPass(bloomPass);
 
+    // Color grading (shadow lift + warm midtones + saturation + vignette).
+    // Tuned to read as "PGA Tour broadcast" without obvious filtering.
+    try {
+      gradePass = new ShaderPass(ColorGradeShader);
+      composer.addPass(gradePass);
+    } catch (err) { console.warn('[visuals] color grade unavailable', err); }
+
     smaaPass = new SMAAPass(size.x * renderer.getPixelRatio(), size.y * renderer.getPixelRatio());
     composer.addPass(smaaPass);
 
@@ -164,6 +236,26 @@ export function applyVisuals(scene, renderer, camera = null) {
     if (ssaoPass) ssaoPass.setSize(w, h);
   }
 
+  // Move the shadow camera so its frustum stays centered on a target point
+  // (typically the ball). Without this, long par-5 shots fall outside the
+  // ±80m frustum and lose their shadows.
+  //
+  // We snap the target to a 16m grid so the shadow map isn't regenerated
+  // every frame (each shadow re-render is a full scene pass for the depth
+  // texture). 16m is small enough that the frustum still contains the player
+  // + ball + nearby trees, but large enough to amortize the cost.
+  const _sunTargetPos = new THREE.Vector3();
+  function setSunTarget(x, z) {
+    if (!sunLight) return;
+    const snapX = Math.round(x / 16) * 16;
+    const snapZ = Math.round(z / 16) * 16;
+    if (_sunTargetPos.x === snapX && _sunTargetPos.z === snapZ) return;
+    _sunTargetPos.set(snapX, 0, snapZ);
+    sunLight.target.position.copy(_sunTargetPos);
+    sunLight.target.updateMatrixWorld();
+    sunLight.position.copy(sunDir).multiplyScalar(SUN_DISTANCE).add(_sunTargetPos);
+  }
+
   function render() {
     if (composer) composer.render();
     else if (camera) renderer.render(scene, camera);
@@ -174,10 +266,12 @@ export function applyVisuals(scene, renderer, camera = null) {
     bloomPass,
     smaaPass,
     ssaoPass,
+    gradePass,
     sunLight,
     sunDirection: sunDir,
     envMap: pmremRT?.texture ?? null,
     render,
     setSize,
+    setSunTarget,
   };
 }
