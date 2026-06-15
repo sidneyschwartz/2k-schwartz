@@ -3,6 +3,7 @@
 // + crown so a few hundred fit cheap. Sign is a small board on a post.
 
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 // ---------- helpers ----------
 
@@ -81,23 +82,57 @@ function holeBounds(holeData) {
 
 // ---------- trees ----------
 
-function makeTreeInstanced(count) {
-  const trunkGeo = new THREE.CylinderGeometry(0.18, 0.25, 1.2, 6);
-  trunkGeo.translate(0, 0.6, 0);
-  const crownGeo = new THREE.ConeGeometry(1.2, 3.5, 8);
-  crownGeo.translate(0, 2.75, 0);
+// Build a layered conifer crown (3 stacked, tapering cones) merged into ONE geometry
+// so the whole tree's foliage is a single instanced draw call but reads as a real
+// pine rather than a traffic cone.
+function makeConiferCrownGeo() {
+  const layers = [
+    new THREE.ConeGeometry(1.5, 2.2, 9).translate(0, 1.9, 0),
+    new THREE.ConeGeometry(1.15, 2.0, 9).translate(0, 3.0, 0),
+    new THREE.ConeGeometry(0.75, 1.8, 9).translate(0, 4.1, 0),
+  ];
+  const geo = mergeGeometries(layers, false);
+  layers.forEach((g) => g.dispose());
+  return geo;
+}
 
-  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x4a2f1a });
-  const crownMat = new THREE.MeshLambertMaterial({ color: 0x2f6b2f });
+// Build a rounded broadleaf crown from a few overlapping low-poly spheres.
+function makeBroadleafCrownGeo() {
+  const blobs = [
+    new THREE.IcosahedronGeometry(1.5, 1).translate(0, 3.0, 0),
+    new THREE.IcosahedronGeometry(1.1, 1).translate(0.9, 2.6, 0.4),
+    new THREE.IcosahedronGeometry(1.0, 1).translate(-0.8, 2.7, -0.5),
+    new THREE.IcosahedronGeometry(0.9, 1).translate(0.2, 3.7, -0.3),
+  ];
+  const geo = mergeGeometries(blobs, false);
+  blobs.forEach((g) => g.dispose());
+  return geo;
+}
+
+function makeTreeInstanced(count, kind = 'conifer') {
+  // Tapered trunk (wide base → narrow top) with a bark-ish color.
+  const trunkGeo = new THREE.CylinderGeometry(0.16, 0.34, 1.8, 7);
+  trunkGeo.translate(0, 0.9, 0);
+  const crownGeo = kind === 'broadleaf' ? makeBroadleafCrownGeo() : makeConiferCrownGeo();
+
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.95, metalness: 0 });
+  // White base color so per-instance setColorAt tints give foliage variety.
+  const crownMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0, flatShading: true });
 
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, count);
   const crowns = new THREE.InstancedMesh(crownGeo, crownMat, count);
   trunks.castShadow = true;
   crowns.castShadow = true;
-  trunks.receiveShadow = false;
+  trunks.receiveShadow = true;
   crowns.receiveShadow = false;
   return { trunks, crowns };
 }
+
+// Green palette for per-instance foliage variation.
+const FOLIAGE_TINTS = [
+  new THREE.Color(0x2f6b2f), new THREE.Color(0x3a7d3a), new THREE.Color(0x27592a),
+  new THREE.Color(0x4c8a3c), new THREE.Color(0x356b2e), new THREE.Color(0x2d6b40),
+];
 
 function scatterTrees(scene, holeData, density = 0.012) {
   const { minX, maxX, minZ, maxZ } = holeBounds(holeData);
@@ -129,23 +164,44 @@ function scatterTrees(scene, holeData, density = 0.012) {
 
   if (!candidates.length) return null;
 
-  const { trunks, crowns } = makeTreeInstanced(candidates.length);
+  // Split candidates ~60/40 between conifers and broadleaf for variety.
+  const coniferPts = [];
+  const broadleafPts = [];
+  for (const c of candidates) (Math.random() < 0.6 ? coniferPts : broadleafPts).push(c);
+
+  const meshes = [];
   const dummy = new THREE.Object3D();
-  candidates.forEach((c, i) => {
-    const scale = 0.85 + Math.random() * 0.6;
-    const rot = Math.random() * Math.PI * 2;
-    dummy.position.set(c.x, 0, c.z);
-    dummy.rotation.set(0, rot, 0);
-    dummy.scale.set(scale, scale * (0.9 + Math.random() * 0.4), scale);
-    dummy.updateMatrix();
-    trunks.setMatrixAt(i, dummy.matrix);
-    crowns.setMatrixAt(i, dummy.matrix);
-  });
-  trunks.instanceMatrix.needsUpdate = true;
-  crowns.instanceMatrix.needsUpdate = true;
-  scene.add(trunks);
-  scene.add(crowns);
-  return { trunks, crowns };
+
+  function buildSpecies(pts, kind) {
+    if (!pts.length) return;
+    const { trunks, crowns } = makeTreeInstanced(pts.length, kind);
+    pts.forEach((c, i) => {
+      const scale = 0.8 + Math.random() * 0.8;
+      const rot = Math.random() * Math.PI * 2;
+      const lean = (Math.random() - 0.5) * 0.08; // slight natural lean
+      dummy.position.set(c.x, 0, c.z);
+      dummy.rotation.set(lean, rot, lean);
+      dummy.scale.set(scale, scale * (0.9 + Math.random() * 0.5), scale);
+      dummy.updateMatrix();
+      trunks.setMatrixAt(i, dummy.matrix);
+      crowns.setMatrixAt(i, dummy.matrix);
+      const tint = FOLIAGE_TINTS[(Math.random() * FOLIAGE_TINTS.length) | 0];
+      crowns.setColorAt(i, tint);
+    });
+    trunks.instanceMatrix.needsUpdate = true;
+    crowns.instanceMatrix.needsUpdate = true;
+    if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
+    scene.add(trunks);
+    scene.add(crowns);
+    meshes.push(trunks, crowns);
+  }
+
+  buildSpecies(coniferPts, 'conifer');
+  buildSpecies(broadleafPts, 'broadleaf');
+
+  // Keep the legacy { trunks, crowns } shape AND expose the full mesh list so
+  // golf.js disposeDecor can clean everything up regardless of species count.
+  return { trunks: meshes[0] ?? null, crowns: meshes[1] ?? null, meshes };
 }
 
 // ---------- tee sign ----------

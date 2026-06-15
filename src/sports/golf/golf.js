@@ -335,8 +335,14 @@ export function mountGolf(host, configOrOnExit) {
   function disposeDecor() {
     if (!activeDecor) return;
     const { trees, sign } = activeDecor;
-    if (trees?.trunks) { scene.remove(trees.trunks); trees.trunks.geometry?.dispose?.(); }
-    if (trees?.crowns) { scene.remove(trees.crowns); trees.crowns.geometry?.dispose?.(); }
+    // New env returns trees.meshes (all species' trunk+crown instanced meshes);
+    // fall back to the legacy trunks/crowns pair.
+    const treeMeshes = trees?.meshes ?? [trees?.trunks, trees?.crowns];
+    for (const m of treeMeshes) {
+      if (!m) continue;
+      scene.remove(m);
+      m.geometry?.dispose?.();
+    }
     if (sign) scene.remove(sign);
     activeDecor = null;
   }
