@@ -334,16 +334,21 @@ export function mountGolf(host, configOrOnExit) {
 
   function disposeDecor() {
     if (!activeDecor) return;
-    const { trees, sign } = activeDecor;
-    // New env returns trees.meshes (all species' trunk+crown instanced meshes);
-    // fall back to the legacy trunks/crowns pair.
-    const treeMeshes = trees?.meshes ?? [trees?.trunks, trees?.crowns];
-    for (const m of treeMeshes) {
-      if (!m) continue;
-      scene.remove(m);
-      m.geometry?.dispose?.();
+    // New env handle owns dispose() (grass mesh + foliage shader materials + rocks
+    // + trees + sign). Prefer it; fall back to manual cleanup for the legacy shape.
+    if (typeof activeDecor.dispose === 'function') {
+      try { activeDecor.dispose(); } catch (err) { console.warn('[golf] activeDecor.dispose failed', err); }
+    } else {
+      const { trees, sign } = activeDecor;
+      const treeMeshes = trees?.meshes ?? [trees?.trunks, trees?.crowns];
+      for (const m of treeMeshes) {
+        if (!m) continue;
+        scene.remove(m);
+        m.geometry?.dispose?.();
+      }
+      if (sign) scene.remove(sign);
     }
-    if (sign) scene.remove(sign);
+    if (host._environment === activeDecor) delete host._environment;
     activeDecor = null;
   }
 

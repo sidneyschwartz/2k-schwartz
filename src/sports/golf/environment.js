@@ -152,6 +152,10 @@ function makeConiferCrownGeo() {
   }
   const geo = mergeGeometries(layers, false);
   layers.forEach((g) => g.dispose());
+  if (!geo) {
+    return new THREE.ConeGeometry(1.5, 4.5, 9).translate(0, 2.25, 0);
+  }
+  geo.computeBoundingSphere();
   return geo;
 }
 
@@ -175,16 +179,27 @@ function makeBroadleafCrownGeo() {
   for (const b of blobs) jitterGeometry(b, 0.18);
 
   // A couple of stub branches that pop out so the foliage isn't a perfect blob.
-  const branchA = new THREE.CylinderGeometry(0.045, 0.07, 0.9, 6);
+  // IcosahedronGeometry is non-indexed; CylinderGeometry is indexed. mergeGeometries
+  // requires uniform indexing, so we flatten the branches to non-indexed too.
+  const branchA = new THREE.CylinderGeometry(0.045, 0.07, 0.9, 6).toNonIndexed();
   branchA.translate(0, 0.45, 0);
   branchA.rotateZ(0.5); branchA.rotateY(0.3);
   branchA.translate(0.6, 2.0, 0.0);
-  const branchB = new THREE.CylinderGeometry(0.04, 0.065, 0.85, 6);
+  const branchB = new THREE.CylinderGeometry(0.04, 0.065, 0.85, 6).toNonIndexed();
   branchB.translate(0, 0.45, 0);
   branchB.rotateZ(-0.6); branchB.rotateY(-0.4);
   branchB.translate(-0.55, 2.1, 0.15);
 
   const merged = mergeGeometries([...blobs, branchA, branchB], false);
+  if (!merged) {
+    // Should not happen now that indexing matches; defensive fallback.
+    blobs.forEach((b) => b.dispose());
+    branchA.dispose(); branchB.dispose();
+    return new THREE.IcosahedronGeometry(1.5, 1).translate(0, 3.0, 0);
+  }
+  // Ensure the merged geometry has a bounding sphere so InstancedMesh frustum
+  // culling doesn't crash on its first render.
+  merged.computeBoundingSphere();
   blobs.forEach((b) => b.dispose());
   branchA.dispose(); branchB.dispose();
   return merged;
@@ -216,7 +231,11 @@ function makeTrunkGeo({ baseR = 0.34, topR = 0.16, height = 1.8, segs = 8 } = {}
 const FOLIAGE_VERT = /* glsl */ `
   uniform float uTime;
   uniform float uWind;
-  attribute vec3 instanceColor; // tint per instance
+  // Per-instance tint. We use a custom attribute name (aTint) instead of
+  // three reserved instanceColor so this ShaderMaterial works regardless
+  // of which three.js version injects what. The geometry attribute is
+  // populated by buildSpecies() with an InstancedBufferAttribute.
+  attribute vec3 aTint;
   varying vec3 vNormalW;
   varying vec3 vWorldPos;
   varying vec3 vTint;
@@ -242,7 +261,7 @@ const FOLIAGE_VERT = /* glsl */ `
     vec3 n = normalize(normalMatrix * (mat3(instanceMatrix) * normal));
     vNormalW = n;
 
-    vTint = instanceColor;
+    vTint = aTint;
     vRelHeight = clamp((p.y - 1.5) / 4.0, 0.0, 1.0);
 
     gl_Position = projectionMatrix * viewMatrix * wp;
@@ -468,6 +487,14 @@ function scatterTrees(scene, holeData, density = 0.012) {
   function buildSpecies(pts, kind) {
     if (!pts.length) return;
     const { trunks, crowns } = makeTreeInstanced(pts.length, kind);
+
+    // Per-instance tint for the crown ShaderMaterial. We use a custom `aTint`
+    // attribute rather than three's reserved `instanceColor` so the custom
+    // shader compiles regardless of three.js version.
+    const tints = new Float32Array(pts.length * 3);
+    const tintAttr = new THREE.InstancedBufferAttribute(tints, 3);
+    crowns.geometry.setAttribute('aTint', tintAttr);
+
     pts.forEach((c, i) => {
       // Three size classes so the forest reads as multi-generational, not
       // copy-pasted. Small saplings (10%), medium (60%), large mature (30%).
@@ -485,12 +512,17 @@ function scatterTrees(scene, holeData, density = 0.012) {
       dummy.updateMatrix();
       trunks.setMatrixAt(i, dummy.matrix);
       crowns.setMatrixAt(i, dummy.matrix);
-      crowns.setColorAt(i, FOLIAGE_TINTS[(Math.random() * FOLIAGE_TINTS.length) | 0]);
+
+      const tint = FOLIAGE_TINTS[(Math.random() * FOLIAGE_TINTS.length) | 0];
+      tints[i * 3]     = tint.r;
+      tints[i * 3 + 1] = tint.g;
+      tints[i * 3 + 2] = tint.b;
+
       trunks.setColorAt(i, BARK_TINTS[(Math.random() * BARK_TINTS.length) | 0]);
     });
     trunks.instanceMatrix.needsUpdate = true;
     crowns.instanceMatrix.needsUpdate = true;
-    if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
+    tintAttr.needsUpdate = true;
     if (trunks.instanceColor) trunks.instanceColor.needsUpdate = true;
     scene.add(trunks);
     scene.add(crowns);
@@ -637,13 +669,42 @@ export function decorateHole(scene, holeData, opts = {}) {
   }
 
   function dispose() {
-    if (grass) { scene.remove(grass.mesh); try { grass.dispose(); } catch {} }
-    if (sign?.parent) scene.remove(sign);
-    if (rocks?.parent) scene.remove(rocks);
-    if (trees?.meshes) for (const m of trees.meshes) scene.remove(m);
-    else {
-      if (trees?.trunks) scene.remove(trees.trunks);
-      if (trees?.crowns) scene.remove(trees.crowns);
+    // Grass: removes the mesh and disposes geometry + shader material.
+    if (grass) {
+      scene.remove(grass.mesh);
+      try { grass.dispose(); } catch {}
+    }
+    // Sign: traverse and dispose every geometry/material so the canvas texture
+    // and post mesh don't linger across hole changes.
+    if (sign) {
+      scene.remove(sign);
+      sign.traverse?.((o) => {
+        o.geometry?.dispose?.();
+        const mat = o.material;
+        if (mat?.map) mat.map.dispose?.();
+        mat?.dispose?.();
+      });
+    }
+    // Rocks: instancedMesh — remove + dispose geo/material.
+    if (rocks) {
+      scene.remove(rocks);
+      rocks.geometry?.dispose?.();
+      rocks.material?.dispose?.();
+    }
+    // Trees: every species' trunk + crown InstancedMesh. Each crown has its own
+    // foliage ShaderMaterial registered in the module-level _foliageMaterials
+    // pool (so tickFoliage() can advance their time uniform). On dispose we
+    // remove them from the pool AND dispose them so we don't leak across holes.
+    const treeMeshes = trees?.meshes ?? [trees?.trunks, trees?.crowns];
+    for (const m of treeMeshes) {
+      if (!m) continue;
+      scene.remove(m);
+      m.geometry?.dispose?.();
+      const mat = m.material;
+      if (mat) {
+        if (mat.isShaderMaterial) _foliageMaterials.delete(mat);
+        mat.dispose?.();
+      }
     }
   }
 
