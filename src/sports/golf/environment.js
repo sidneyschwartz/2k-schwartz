@@ -90,43 +90,244 @@ function holeBounds(holeData) {
 }
 
 // ---------- trees ----------
+//
+// Two species, both rendered as InstancedMesh (1 draw call each for trunks
+// and 1 for crowns):
+//
+//   conifer:   layered, jittered cones with denser, more numerous tiers.
+//              Foliage is densely irregular — reads as a pine, not a cone.
+//   broadleaf: noise-displaced icosphere clusters with proper lobed silhouette
+//              and a few exposed branches sticking through the crown.
+//
+// Foliage uses a custom shader extending Standard: it adds AO-style darkening
+// at clump centers, brighter tips, per-instance tint and height variation, and
+// a gentle wind sway driven by a shared uTime + per-instance phase attribute.
 
-// Build a layered conifer crown (3 stacked, tapering cones) merged into ONE geometry
-// so the whole tree's foliage is a single instanced draw call but reads as a real
-// pine rather than a traffic cone.
+// Random in [-1, 1] without bias.
+function rng() { return Math.random() * 2 - 1; }
+
+// Jitter a position attribute in-place by a per-vertex random offset bounded by
+// `mag`. Recomputes flat-ish normals after. Use this to roughen up the
+// silhouette of cones and icospheres so they don't look mathematical.
+function jitterGeometry(geo, mag = 0.12) {
+  const pos = geo.attributes.position;
+  // Group identical positions so seams don't pop apart.
+  const key = (x, y, z) =>
+    `${(x * 100) | 0}_${(y * 100) | 0}_${(z * 100) | 0}`;
+  const seen = new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const k = key(x, y, z);
+    let off = seen.get(k);
+    if (!off) {
+      off = { x: rng() * mag, y: rng() * mag * 0.6, z: rng() * mag };
+      seen.set(k, off);
+    }
+    pos.setXYZ(i, x + off.x, y + off.y, z + off.z);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+}
+
+// Build a conifer crown: 5 stacked tapered cones with jitter for ragged
+// branches. Each layer is rotated slightly so the silhouette doesn't repeat.
 function makeConiferCrownGeo() {
-  const layers = [
-    new THREE.ConeGeometry(1.5, 2.2, 9).translate(0, 1.9, 0),
-    new THREE.ConeGeometry(1.15, 2.0, 9).translate(0, 3.0, 0),
-    new THREE.ConeGeometry(0.75, 1.8, 9).translate(0, 4.1, 0),
+  const layers = [];
+  // Bottom tier widest, top narrowest. Layers overlap so there are no gaps.
+  const tiers = [
+    { y: 1.6, r: 1.7,  h: 1.6, seg: 11 },
+    { y: 2.4, r: 1.45, h: 1.5, seg: 10 },
+    { y: 3.1, r: 1.20, h: 1.4, seg: 10 },
+    { y: 3.8, r: 0.95, h: 1.3, seg: 9 },
+    { y: 4.5, r: 0.65, h: 1.1, seg: 8 },
+    { y: 5.1, r: 0.30, h: 0.8, seg: 7 },
   ];
+  for (const t of tiers) {
+    const g = new THREE.ConeGeometry(t.r, t.h, t.seg);
+    g.translate(0, t.y, 0);
+    // Rotate each layer randomly so seams don't line up vertically.
+    g.rotateY(Math.random() * Math.PI * 2);
+    jitterGeometry(g, 0.13);
+    layers.push(g);
+  }
   const geo = mergeGeometries(layers, false);
   layers.forEach((g) => g.dispose());
   return geo;
 }
 
-// Build a rounded broadleaf crown from a few overlapping low-poly spheres.
+// Build a broadleaf crown: a cluster of noise-displaced icospheres of varying
+// size and offset, plus a couple of internal branches that poke through.
 function makeBroadleafCrownGeo() {
   const blobs = [
-    new THREE.IcosahedronGeometry(1.5, 1).translate(0, 3.0, 0),
-    new THREE.IcosahedronGeometry(1.1, 1).translate(0.9, 2.6, 0.4),
-    new THREE.IcosahedronGeometry(1.0, 1).translate(-0.8, 2.7, -0.5),
-    new THREE.IcosahedronGeometry(0.9, 1).translate(0.2, 3.7, -0.3),
+    // Central canopy
+    new THREE.IcosahedronGeometry(1.7, 1).translate(0, 3.0, 0),
+    // Side lobes
+    new THREE.IcosahedronGeometry(1.25, 1).translate(1.1, 2.8, 0.4),
+    new THREE.IcosahedronGeometry(1.20, 1).translate(-1.0, 2.7, -0.5),
+    new THREE.IcosahedronGeometry(1.05, 1).translate(0.4, 3.6, -0.8),
+    new THREE.IcosahedronGeometry(0.95, 1).translate(-0.6, 3.5, 0.7),
+    // Crown top
+    new THREE.IcosahedronGeometry(0.90, 1).translate(0.1, 4.0, 0.1),
+    // Skirt blobs hanging down a little
+    new THREE.IcosahedronGeometry(0.75, 1).translate(0.8, 2.1, 0.6),
+    new THREE.IcosahedronGeometry(0.70, 1).translate(-0.7, 2.2, -0.3),
   ];
-  const geo = mergeGeometries(blobs, false);
-  blobs.forEach((g) => g.dispose());
+  for (const b of blobs) jitterGeometry(b, 0.18);
+
+  // A couple of stub branches that pop out so the foliage isn't a perfect blob.
+  const branchA = new THREE.CylinderGeometry(0.045, 0.07, 0.9, 6);
+  branchA.translate(0, 0.45, 0);
+  branchA.rotateZ(0.5); branchA.rotateY(0.3);
+  branchA.translate(0.6, 2.0, 0.0);
+  const branchB = new THREE.CylinderGeometry(0.04, 0.065, 0.85, 6);
+  branchB.translate(0, 0.45, 0);
+  branchB.rotateZ(-0.6); branchB.rotateY(-0.4);
+  branchB.translate(-0.55, 2.1, 0.15);
+
+  const merged = mergeGeometries([...blobs, branchA, branchB], false);
+  blobs.forEach((b) => b.dispose());
+  branchA.dispose(); branchB.dispose();
+  return merged;
+}
+
+// Build a tapered trunk: 8-sided cylinder with a slight curve and bark grooves
+// (radial vertex jitter on the sides). Keeps the trunk count low (<100 tris).
+function makeTrunkGeo({ baseR = 0.34, topR = 0.16, height = 1.8, segs = 8 } = {}) {
+  const geo = new THREE.CylinderGeometry(topR, baseR, height, segs, 3);
+  geo.translate(0, height / 2, 0);
+  // Slight bark roughness: jitter X/Z by a small amount (NOT Y, so the trunk
+  // doesn't grow taller).
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const r = Math.hypot(x, z) || 1;
+    const wob = (Math.random() - 0.5) * 0.025;
+    pos.setXYZ(i, x + (x / r) * wob, y, z + (z / r) * wob);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
   return geo;
 }
 
+// Foliage shader: wind sway + AO + tip-lighter gradient + per-instance tint.
+// Wraps the basic standard material features we need without paying for the
+// full MeshStandardMaterial PBR cost (which is overkill for ~tens of thousands
+// of tris of leaves).
+const FOLIAGE_VERT = /* glsl */ `
+  uniform float uTime;
+  uniform float uWind;
+  attribute vec3 instanceColor; // tint per instance
+  varying vec3 vNormalW;
+  varying vec3 vWorldPos;
+  varying vec3 vTint;
+  varying float vRelHeight; // 0 at trunk top, 1 at crown top
+
+  void main() {
+    vec3 p = position;
+
+    // Wind sway: only affects high parts of the crown. The base of the foliage
+    // sits at ~y=1.5; cap the sway so it doesn't drift past visual plausibility.
+    float swayMask = clamp((p.y - 1.6) * 0.55, 0.0, 1.0);
+    // Use the per-instance world position so adjacent trees don't sway in lockstep.
+    vec3 instPos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+    float ph = instPos.x * 0.21 + instPos.z * 0.17;
+    float t = uTime;
+    p.x += sin(t * 1.1 + ph) * uWind * 0.18 * swayMask;
+    p.z += cos(t * 0.9 + ph * 1.3) * uWind * 0.13 * swayMask;
+
+    vec4 wp = instanceMatrix * vec4(p, 1.0);
+    wp = modelMatrix * wp;
+    vWorldPos = wp.xyz;
+
+    vec3 n = normalize(normalMatrix * (mat3(instanceMatrix) * normal));
+    vNormalW = n;
+
+    vTint = instanceColor;
+    vRelHeight = clamp((p.y - 1.5) / 4.0, 0.0, 1.0);
+
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+
+const FOLIAGE_FRAG = /* glsl */ `
+  precision highp float;
+  uniform vec3 uSunDir;
+  uniform vec3 uSunColor;
+  uniform vec3 uAmbient;
+  uniform vec3 uBaseColor;
+  uniform vec3 uTipColor;
+  uniform vec3 uFogColor;
+  uniform float uFogNear;
+  uniform float uFogFar;
+  uniform vec3 uCamPos;
+
+  varying vec3 vNormalW;
+  varying vec3 vWorldPos;
+  varying vec3 vTint;
+  varying float vRelHeight;
+
+  void main() {
+    vec3 normal = normalize(vNormalW);
+    // Gradient: base color at the interior, tip color at high relative height.
+    vec3 col = mix(uBaseColor, uTipColor, vRelHeight);
+    col *= vTint;
+
+    // Lambert + ambient.
+    float ndl = max(dot(normal, normalize(uSunDir)), 0.0);
+    // Soften the contact light so deeply-shaded undersides still read green.
+    vec3 lit = col * (uAmbient + uSunColor * ndl);
+
+    // Cheap fake-AO: darker for downward-facing normals (interior of the crown).
+    float ao = 0.55 + 0.45 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    lit *= ao;
+
+    // Distance fog matching the scene.
+    float d = distance(uCamPos, vWorldPos);
+    float fog = clamp((d - uFogNear) / max(1.0, uFogFar - uFogNear), 0.0, 1.0);
+    lit = mix(lit, uFogColor, fog);
+
+    gl_FragColor = vec4(lit, 1.0);
+  }
+`;
+
+function makeFoliageMaterial(kind) {
+  const isConifer = kind === 'conifer';
+  return new THREE.ShaderMaterial({
+    vertexShader: FOLIAGE_VERT,
+    fragmentShader: FOLIAGE_FRAG,
+    uniforms: {
+      uTime:      { value: 0 },
+      uWind:      { value: 0.7 },
+      uSunDir:    { value: new THREE.Vector3(0.5, 1, 0.5).normalize() },
+      uSunColor:  { value: new THREE.Color(0xfff2dd) },
+      uAmbient:   { value: new THREE.Color(0x3a4a30) },
+      uBaseColor: { value: new THREE.Color(isConifer ? 0x1f3a1a : 0x2a4f24) },
+      uTipColor:  { value: new THREE.Color(isConifer ? 0x4f7e3a : 0x8fbd5a) },
+      uFogColor:  { value: new THREE.Color(0xbcd4e6) },
+      uFogNear:   { value: 60 },
+      uFogFar:    { value: 600 },
+      uCamPos:    { value: new THREE.Vector3() },
+    },
+  });
+}
+
+// Track foliage materials so the env can advance their time + camera uniforms.
+const _foliageMaterials = new Set();
+
 function makeTreeInstanced(count, kind = 'conifer') {
-  // Tapered trunk (wide base → narrow top) with a bark-ish color.
-  const trunkGeo = new THREE.CylinderGeometry(0.16, 0.34, 1.8, 7);
-  trunkGeo.translate(0, 0.9, 0);
+  const trunkGeo = makeTrunkGeo({
+    baseR: kind === 'broadleaf' ? 0.40 : 0.30,
+    topR:  kind === 'broadleaf' ? 0.22 : 0.14,
+    height: kind === 'broadleaf' ? 2.1 : 1.7,
+    segs: 8,
+  });
   const crownGeo = kind === 'broadleaf' ? makeBroadleafCrownGeo() : makeConiferCrownGeo();
 
-  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.95, metalness: 0 });
-  // White base color so per-instance setColorAt tints give foliage variety.
-  const crownMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0, flatShading: true });
+  // Trunk uses a cheap MeshLambertMaterial with vertex-driven instance tinting
+  // so each tree gets a slightly different bark color.
+  const trunkMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  const crownMat = makeFoliageMaterial(kind);
+  _foliageMaterials.add(crownMat);
 
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, count);
   const crowns = new THREE.InstancedMesh(crownGeo, crownMat, count);
@@ -134,13 +335,35 @@ function makeTreeInstanced(count, kind = 'conifer') {
   crowns.castShadow = true;
   trunks.receiveShadow = true;
   crowns.receiveShadow = false;
+  trunks.frustumCulled = true;
+  crowns.frustumCulled = true;
   return { trunks, crowns };
 }
 
-// Green palette for per-instance foliage variation.
+// Engine should call this from its tick to animate the wind sway + update the
+// camera-position uniform for fog and (eventually) view-dependent shading.
+export function tickFoliage(dt, { cameraPos, sunDir, wind } = {}) {
+  for (const m of _foliageMaterials) {
+    m.uniforms.uTime.value += dt;
+    if (cameraPos) m.uniforms.uCamPos.value.copy(cameraPos);
+    if (sunDir)    m.uniforms.uSunDir.value.copy(sunDir).normalize();
+    if (typeof wind === 'number') m.uniforms.uWind.value = wind;
+  }
+}
+
+// Green + bark palettes for per-instance variation.
 const FOLIAGE_TINTS = [
-  new THREE.Color(0x2f6b2f), new THREE.Color(0x3a7d3a), new THREE.Color(0x27592a),
-  new THREE.Color(0x4c8a3c), new THREE.Color(0x356b2e), new THREE.Color(0x2d6b40),
+  new THREE.Color(0.90, 0.95, 0.85),
+  new THREE.Color(1.00, 1.05, 0.95),
+  new THREE.Color(0.85, 0.95, 0.80),
+  new THREE.Color(1.05, 1.00, 0.85),
+  new THREE.Color(0.95, 1.00, 0.90),
+  new THREE.Color(0.80, 0.90, 0.78),
+];
+const BARK_TINTS = [
+  new THREE.Color(0x4f3220), new THREE.Color(0x5a3a22),
+  new THREE.Color(0x6b4a30), new THREE.Color(0x42291a),
+  new THREE.Color(0x7a5236),
 ];
 
 // ---------- rocks ----------
@@ -246,21 +469,29 @@ function scatterTrees(scene, holeData, density = 0.012) {
     if (!pts.length) return;
     const { trunks, crowns } = makeTreeInstanced(pts.length, kind);
     pts.forEach((c, i) => {
-      const scale = 0.8 + Math.random() * 0.8;
+      // Three size classes so the forest reads as multi-generational, not
+      // copy-pasted. Small saplings (10%), medium (60%), large mature (30%).
+      const sizeRoll = Math.random();
+      let scale;
+      if (sizeRoll < 0.10) scale = 0.55 + Math.random() * 0.20;       // sapling
+      else if (sizeRoll < 0.70) scale = 0.85 + Math.random() * 0.35;  // medium
+      else scale = 1.25 + Math.random() * 0.55;                       // mature
+      const yScale = scale * (0.92 + Math.random() * 0.18);
       const rot = Math.random() * Math.PI * 2;
-      const lean = (Math.random() - 0.5) * 0.08; // slight natural lean
+      const lean = (Math.random() - 0.5) * 0.08;
       dummy.position.set(c.x, 0, c.z);
       dummy.rotation.set(lean, rot, lean);
-      dummy.scale.set(scale, scale * (0.9 + Math.random() * 0.5), scale);
+      dummy.scale.set(scale, yScale, scale);
       dummy.updateMatrix();
       trunks.setMatrixAt(i, dummy.matrix);
       crowns.setMatrixAt(i, dummy.matrix);
-      const tint = FOLIAGE_TINTS[(Math.random() * FOLIAGE_TINTS.length) | 0];
-      crowns.setColorAt(i, tint);
+      crowns.setColorAt(i, FOLIAGE_TINTS[(Math.random() * FOLIAGE_TINTS.length) | 0]);
+      trunks.setColorAt(i, BARK_TINTS[(Math.random() * BARK_TINTS.length) | 0]);
     });
     trunks.instanceMatrix.needsUpdate = true;
     crowns.instanceMatrix.needsUpdate = true;
     if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
+    if (trunks.instanceColor) trunks.instanceColor.needsUpdate = true;
     scene.add(trunks);
     scene.add(crowns);
     meshes.push(trunks, crowns);
@@ -377,6 +608,12 @@ export function decorateHole(scene, holeData, opts = {}) {
         wind: ctx.wind ?? windSpeed,
       });
     }
+    // Trees: animate the wind sway uniform and feed camera pos for fog.
+    tickFoliage(dt, {
+      cameraPos: ctx.cameraPos,
+      sunDir: ctx.sunDir,
+      wind: ctx.wind ?? windSpeed,
+    });
   }
 
   function setGrassDensity(d) {
