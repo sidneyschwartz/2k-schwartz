@@ -368,6 +368,105 @@ canvas { display: block; }
   to { opacity: 0; transform: translate(-50%, -10px); }
 }
 
+/* ---------------- Multiplayer disconnect banner ---------------- */
+.golf-disconnect {
+  position: fixed;
+  top: 56px; left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(160deg, rgba(120, 18, 30, 0.94), rgba(78, 12, 22, 0.94));
+  border: 1px solid rgba(255, 93, 109, 0.5);
+  color: var(--fg);
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: flex; align-items: center; gap: 12px;
+  z-index: 70;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+  font-size: 0.9rem;
+  font-weight: 600;
+  animation: discon-in 0.2s ease-out;
+}
+.golf-disconnect__dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--bad);
+  box-shadow: 0 0 0 0 rgba(255, 93, 109, 0.7);
+  animation: pulse-red 1.4s ease-out infinite;
+}
+.golf-disconnect__msg { letter-spacing: 0.01em; }
+.golf-disconnect .btn { padding: 6px 12px; }
+@keyframes pulse-red {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 93, 109, 0.6); }
+  70%  { box-shadow: 0 0 0 10px rgba(255, 93, 109, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 93, 109, 0); }
+}
+@keyframes discon-in {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---------------- Lie panel + post-shot stats card ---------------- */
+.golf-hud__lie {
+  min-width: 90px;
+}
+.golf-hud__lie-name {
+  font-size: 1.05rem;
+  font-weight: 700;
+  text-transform: capitalize;
+  letter-spacing: 0.02em;
+}
+.golf-hud__lie--tee     { color: #fff; }
+.golf-hud__lie--fairway { color: var(--good); }
+.golf-hud__lie--green   { color: #b7f0a5; }
+.golf-hud__lie--rough   { color: #c4d6a8; }
+.golf-hud__lie--sand    { color: var(--accent-2); }
+.golf-hud__lie--water   { color: #6bbcff; }
+.golf-hud__lie--oob     { color: var(--bad); }
+
+.golf-hud__stats {
+  position: absolute;
+  right: 16px;
+  bottom: 90px;
+  background: linear-gradient(160deg, rgba(8,14,30,0.92), rgba(8,14,30,0.78));
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 12px 16px;
+  min-width: 220px;
+  pointer-events: auto;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.golf-hud__stats--show {
+  opacity: 1;
+  transform: translateY(0);
+}
+.golf-hud__stats-title {
+  font-size: 0.7rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  margin-bottom: 6px;
+}
+.golf-hud__stats-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  row-gap: 4px;
+  column-gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.golf-hud__stats-grid dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.golf-hud__stats-grid dd {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-align: right;
+}
+
 /* ---------------- Golf icon buttons (top-left overlay) ---------------- */
 .golf-iconbtn {
   background: rgba(0,0,0,0.55);

@@ -13,48 +13,143 @@ import { createPhysics } from './physics.js';
 import { createSwingController } from './swing.js';
 import { clubs } from './clubs.js';
 import { connectGolf } from './net.js';
-import { DEMO_HOLES, getHole } from './course/holes.js';
-import { buildHole } from './course/terrain.js';
+import { HOLES, getHole } from './course/holes.js';
+import { buildHole, lieAt } from './course/terrain.js';
 import { createAiGolfer, AI_PERSONAS } from './ai.js';
 import { createAudio, clubHitName } from './audio.js';
 import { divotSpray, ballTrail, splashEffect } from './vfx.js';
 import { mountMinimap } from './minimap.js';
 import { mountSettings, loadSettings } from './settings.js';
 import { showRoundSummary } from './round-summary.js';
+import { applyMaterial, tickWater } from './materials.js';
+import { applyVisuals } from './visuals.js';
+import { createGolfer } from './characters.js';
 
-// Optional: art agent provides holeFlyover() in environment.js. Resolved lazily so
-// older builds without environment.js don't crash.
+// Optional modules (lazily resolved so a missing file doesn't break the bundle).
 let _holeFlyover = null;
-import('./environment.js')
-  .then((mod) => { _holeFlyover = mod.holeFlyover ?? null; })
-  .catch(() => { _holeFlyover = null; });
+let _decorateHole = null;
+import('./environment.js').then((mod) => {
+  _holeFlyover = mod.holeFlyover ?? null;
+  _decorateHole = mod.decorateHole ?? null;
+}).catch(() => {});
 
-const HOLE_RADIUS = 0.108;        // real golf hole radius (m)
+// lies.js — engine-owned. Defensive stubs so this file is correct even if missing.
+let _shotModifiers = (_lie) => ({ powerMul: 1, spinMul: 1, loftBias: 0, frictionTag: 'fairway', rollMul: 1 });
+let _LIE_LABELS = { tee: 'Tee', fairway: 'Fairway', rough: 'Rough', sand: 'Sand', green: 'Green', water: 'Water', oob: 'Out of bounds' };
+import('./lies.js').then((m) => {
+  if (m.shotModifiers) _shotModifiers = m.shotModifiers;
+  if (m.LIE_LABELS) _LIE_LABELS = m.LIE_LABELS;
+}).catch(() => {});
 
-// Try to resolve the art-agent material factories if present. We pass an applyMaterial
-// callback to buildHole so terrain.js can attach textured materials per surface — and
-// silently fall back to flat colors if materials.js isn't merged yet.
-async function loadApplyMaterial() {
-  try {
-    const mod = await import('./materials.js');
-    const factories = {
-      fairway: mod.fairwayMaterial,
-      rough: mod.roughMaterial,
-      green: mod.greenMaterial,
-      tee: mod.fairwayMaterial,      // tee box uses fairway texture
-      sand: mod.sandMaterial,
-      water: mod.waterMaterial,
-    };
-    return (surface, mesh) => {
-      const f = factories[surface];
-      if (!f) return null;
-      const m = f();
-      mesh.material = m;
-      return m;
-    };
-  } catch {
-    return null;
+const HOLE_RADIUS = 0.108;
+const CUP_CATCH_RADIUS = HOLE_RADIUS * 1.05;       // tighter cup
+const CUP_PUTT_SPEED_LIMIT = 2.2;                  // m/s — too fast → lip out
+
+// Infer the ball's current lie from holeData regions (used by the HUD when the
+// engine doesn't expose a dedicated getLie() classifier). Walks regions in order;
+// the last matching region wins so finer-grained ones like 'green' override 'fairway'.
+function inferLieFromHole(hole, x, z) {
+  if (!hole || !Array.isArray(hole.regions)) return 'fairway';
+  let lie = 'rough';
+  for (const r of hole.regions) {
+    if (!r) continue;
+    if (r.shape === 'rect') {
+      if (Math.abs(x - r.x) <= (r.w ?? 0) / 2 && Math.abs(z - r.z) <= (r.d ?? 0) / 2) lie = r.type;
+    } else if (r.shape === 'circle') {
+      const dx = x - r.x, dz = z - r.z;
+      if (dx * dx + dz * dz <= (r.r ?? 0) ** 2) lie = r.type;
+    } else if (r.shape === 'ring') {
+      const dx = x - r.x, dz = z - r.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= (r.r ?? 0) ** 2 && d2 <= (r.r2 ?? 0) ** 2) lie = r.type;
+    } else if (r.shape === 'spline') {
+      const pts = r.points || [];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1];
+        const halfW = ((a.w || 12) + (b.w || 12)) * 0.25;
+        if (_pointNearSegment(x, z, a.x, a.z, b.x, b.z, halfW)) {
+          lie = r.type;
+          break;
+        }
+      }
+    } else if (r.shape === 'fill') {
+      lie = r.type;
+    }
   }
+  return lie;
+}
+function _pointNearSegment(px, pz, ax, az, bx, bz, halfWidth) {
+  const dx = bx - ax, dz = bz - az;
+  const len2 = dx * dx + dz * dz;
+  if (len2 === 0) return ((px - ax) ** 2 + (pz - az) ** 2) <= halfWidth ** 2;
+  let t = ((px - ax) * dx + (pz - az) * dz) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const qx = ax + t * dx, qz = az + t * dz;
+  return ((px - qx) ** 2 + (pz - qz) ** 2) <= halfWidth ** 2;
+}
+
+// ---------- broadcast camera mode router ----------
+function makeCameraDirector(camState, followBall) {
+  let mode = 'chase';
+  return {
+    setMode(m) { mode = m; },
+    getMode() { return mode; },
+    update(dt, ctx) {
+      switch (mode) {
+        case 'address': camState.distance = 5.0; camState.height = 1.9; break;
+        case 'backswing':
+        case 'impact': camState.distance = 4.2; camState.height = 1.7; break;
+        case 'flight': camState.distance = 11; camState.height = 4.5; break;
+        case 'landing': camState.distance = 7; camState.height = 3.2; break;
+        case 'putt': camState.distance = 3.8; camState.height = 1.4; break;
+        case 'chase':
+        default: camState.distance = 6.5; camState.height = 2.4; break;
+      }
+      followBall(ctx.ballMesh, ctx.pinTarget, dt, {
+        aimYaw: ctx.aimYaw,
+        inFlight: ctx.inFlight,
+      });
+    },
+  };
+}
+
+// ---------- shot tracer (fading post-shot line through replay frames) ----------
+function makeShotTracer(scene) {
+  const MAX_POINTS = 240;
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(MAX_POINTS * 3);
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.LineBasicMaterial({ color: 0xffd24a, transparent: true, opacity: 0 });
+  const line = new THREE.Line(geo, mat);
+  line.frustumCulled = false;
+  line.visible = false;
+  scene.add(line);
+  let active = false;
+  let aliveSince = 0;
+
+  function setFrames(frames) {
+    if (!frames || !frames.length) { hide(); return; }
+    const n = Math.min(frames.length, MAX_POINTS);
+    for (let i = 0; i < n; i++) {
+      const f = frames[i];
+      pos[i * 3] = f.x; pos[i * 3 + 1] = f.y; pos[i * 3 + 2] = f.z;
+    }
+    geo.setDrawRange(0, n);
+    geo.attributes.position.needsUpdate = true;
+    mat.opacity = 0.9;
+    line.visible = true;
+    active = true;
+    aliveSince = performance.now();
+  }
+  function hide() { line.visible = false; mat.opacity = 0; active = false; }
+  function update() {
+    if (!active) return;
+    const t = (performance.now() - aliveSince) / 1000;
+    if (t > 6) hide();
+    else if (t > 3) mat.opacity = Math.max(0, 0.9 * (1 - (t - 3) / 3));
+  }
+  function dispose() { scene.remove(line); geo.dispose(); mat.dispose(); }
+  return { setFrames, hide, update, dispose };
 }
 
 // Accepts either:
@@ -71,13 +166,19 @@ export function mountGolf(host, configOrOnExit) {
   host.innerHTML = '';
   host.style.position = 'relative';
 
-  // ---- Scene ----
-  const { scene, camera, renderer, followBall, dispose: disposeScene, camState } = createScene(host);
+  // ---- Scene + visuals ----
+  const sceneObj = createScene(host);
+  const { scene, camera, renderer, followBall, resetCameraFor, addResizeHook, camState, dispose: disposeScene } = sceneObj;
+
+  // Layer art-director's polish (sky shader, ACES, bloom, SMAA, shadow tuning).
+  let visuals = null;
+  try { visuals = applyVisuals(scene, renderer, camera); } catch (err) { console.warn('[golf] applyVisuals failed', err); }
+  if (visuals?.setSize) addResizeHook?.((w, h) => visuals.setSize(w, h));
 
   // ---- Physics ----
   const physics = createPhysics();
 
-  // Ball mesh synced from physics
+  // Ball mesh
   const ballMesh = new THREE.Mesh(
     new THREE.SphereGeometry(physics.BALL_RADIUS, 24, 16),
     new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 }),
@@ -85,24 +186,26 @@ export function mountGolf(host, configOrOnExit) {
   ballMesh.castShadow = true;
   scene.add(ballMesh);
 
-  // Aim arrow (visual line from ball toward pin direction adjusted by aim)
+  // Aim line
   const aimGeo = new THREE.BufferGeometry();
   aimGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
-  const aimLine = new THREE.Line(
-    aimGeo,
-    new THREE.LineBasicMaterial({ color: 0xffeb3b }),
-  );
+  const aimLine = new THREE.Line(aimGeo, new THREE.LineBasicMaterial({ color: 0xffeb3b }));
   scene.add(aimLine);
 
-  // Pin sensor target (used for camera follow). Re-positioned per hole.
   const pinTarget = new THREE.Object3D();
   scene.add(pinTarget);
 
-  // Current hole state (terrain instance is rebuilt on each hole change).
+  // Shot tracer + camera director
+  const tracer = makeShotTracer(scene);
+  const camDir = makeCameraDirector(camState, followBall);
+
+  // Per-hole state
   let activeTerrain = null;
-  let teeWorld = new THREE.Vector3();
-  let pinWorld = new THREE.Vector3();
-  let applyMaterial = null;
+  let activeDecor = null;       // { trees, sign }
+  let golfer = null;
+  const teeWorld = new THREE.Vector3();
+  const pinWorld = new THREE.Vector3();
+  const previousShotStart = new THREE.Vector3();
 
   // ---- Game state ----
   const game = {
@@ -120,11 +223,11 @@ export function mountGolf(host, configOrOnExit) {
     activeSlot: 0,
     localActive: !isMultiplayer,
     hole: 1,
-    par: DEMO_HOLES[0].par,
-    holeName: DEMO_HOLES[0].name,
-    holeData: DEMO_HOLES[0],
-    holeCount: DEMO_HOLES.length,
-    holes: DEMO_HOLES.map((h) => ({ par: h.par, length: h.yardage })),
+    par: HOLES[0].par,
+    holeName: HOLES[0].name,
+    holeData: HOLES[0],
+    holeCount: HOLES.length,
+    holes: HOLES.map((h) => ({ par: h.par, length: h.yardage })),
     // CPU state (single-player vs CPU): alternating-hole format. Player plays the
     // hole, then the CPU plays the same hole, then we advance both.
     cpuPhase: hasCpu ? 'player' : null, // 'player' | 'cpu' | 'done'
@@ -135,21 +238,21 @@ export function mountGolf(host, configOrOnExit) {
         { name: character?.name || 'You', scores: [] },
         { name: 'Opponent', scores: [] },
       ],
-      par: DEMO_HOLES.map((h) => h.par),
-      holeCount: DEMO_HOLES.length,
+      par: HOLES.map((h) => h.par),
+      holeCount: HOLES.length,
       currentHole: 1,
     } : hasCpu ? {
       players: [
         { name: character?.name || 'You', scores: [] },
         { name: AI_PERSONAS[cpu.personaId]?.name ?? 'CPU', scores: [] },
       ],
-      par: DEMO_HOLES.map((h) => h.par),
-      holeCount: DEMO_HOLES.length,
+      par: HOLES.map((h) => h.par),
+      holeCount: HOLES.length,
       currentHole: 1,
     } : {
       players: [{ name: character?.name || 'You', scores: [] }],
-      par: DEMO_HOLES.map((h) => h.par),
-      holeCount: DEMO_HOLES.length,
+      par: HOLES.map((h) => h.par),
+      holeCount: HOLES.length,
       currentHole: 1,
     },
   };
@@ -161,14 +264,35 @@ export function mountGolf(host, configOrOnExit) {
     holeData: game.holeData,
   }) : null;
 
+  function disposeDecor() {
+    if (!activeDecor) return;
+    const { trees, sign } = activeDecor;
+    if (trees?.trunks) { scene.remove(trees.trunks); trees.trunks.geometry?.dispose?.(); }
+    if (trees?.crowns) { scene.remove(trees.crowns); trees.crowns.geometry?.dispose?.(); }
+    if (sign) scene.remove(sign);
+    activeDecor = null;
+  }
+
   function loadHole(holeNumber) {
     const data = getHole(holeNumber);
     if (activeTerrain) { try { activeTerrain.dispose(); } catch {} activeTerrain = null; }
+    disposeDecor();
+    // Materials.js DISPATCHER (water Reflector, elevated greens with cliffs, PBR maps).
     activeTerrain = buildHole(scene, physics, data, { applyMaterial });
+    if (_decorateHole) {
+      try { activeDecor = _decorateHole(scene, data); } catch (err) { console.warn('[golf] decorateHole failed', err); }
+    }
     teeWorld.copy(activeTerrain.teeWorld);
     pinWorld.copy(activeTerrain.pinWorld);
     pinTarget.position.copy(pinWorld);
-    physics.setWind(data.wind ?? { speed: 0, dir: 0 });
+    physics.setWind?.(data.wind ?? { speed: 0, dir: 0 });
+    // Per-hole deterministic green slope so putts have a believable break.
+    if (physics.setGreenSlope) {
+      const n = data.number || 1;
+      const ax = Math.sin(n * 1.7) * 0.25;
+      const az = Math.cos(n * 0.9) * 0.20;
+      physics.setGreenSlope({ ax, az });
+    }
     game.wind = {
       speed: data.wind?.speed ?? 0,
       dir: data.wind?.dir ?? 0,
@@ -181,6 +305,15 @@ export function mountGolf(host, configOrOnExit) {
     if (game.scorecard) game.scorecard.currentHole = data.number;
     if (ai) ai.holeData = data;
     placeBallOnTee();
+    game.lie = 'tee';
+    previousShotStart.copy(physics.ball.position);
+    tracer.hide();
+    // SNAP chase camera to a fresh per-hole framing (kills the "looking-at-sky" bug
+    // where camState.smoothed was left at the prior hole's settled position).
+    resetCameraFor?.(physics.ball.position, pinWorld);
+    if (!golfer) mountGolfer();
+    placeGolferAtTee();
+    golfer?.setSwingState?.('idle');
   }
 
   function placeBallOnTee() {
@@ -191,10 +324,27 @@ export function mountGolf(host, configOrOnExit) {
     physics.ball.wakeUp();
   }
 
-  // Load hole 1 immediately (synchronously, using fallback materials). When the
-  // art-agent module finishes loading, we don't rebuild — Phase 2 can hot-swap if needed.
+  function mountGolfer() {
+    const id = character?.id ?? 'tiger';
+    try {
+      golfer = createGolfer({ character: id });
+      if (golfer?.group) scene.add(golfer.group);
+    } catch (err) { console.warn('[golf] createGolfer failed', err); golfer = null; }
+  }
+  function placeGolferAtTee() {
+    if (!golfer?.group) return;
+    const dx = pinWorld.x - physics.ball.position.x;
+    const dz = pinWorld.z - physics.ball.position.z;
+    const yaw = Math.atan2(dx, dz);
+    golfer.group.position.set(
+      physics.ball.position.x - Math.sin(yaw) * 0.6,
+      0,
+      physics.ball.position.z - Math.cos(yaw) * 0.6,
+    );
+    golfer.group.rotation.set(0, yaw, 0);
+  }
+
   loadHole(1);
-  loadApplyMaterial().then((fn) => { applyMaterial = fn; });
 
   // ---- Audio + VFX ----
   const audio = createAudio();
@@ -204,23 +354,37 @@ export function mountGolf(host, configOrOnExit) {
 
   // ---- Swing controller ----
   const swing = createSwingController({
-    onSwingStart: () => { audio.play('click_meter'); },
+    onSwingStart: () => {
+      audio.play('click_meter');
+      golfer?.setSwingState?.('address');
+      camDir.setMode(swing.state.putting ? 'putt' : 'address');
+    },
     onShot: (shot) => launchShot(shot),
   });
   swing.attach(window);
 
-  function launchShot({ club, power, accuracyError, aimYaw, stance }) {
+  function launchShot({ club, power, accuracyError, aimYaw, stance, isPutt: isPuttFlag }) {
     if (game.complete) return;
     if (isMultiplayer && !game.localActive) return;
-    if (hasCpu && game.cpuPhase !== 'player') return; // ignore human swings during CPU's turn
+    if (hasCpu && game.cpuPhase !== 'player') return;
+
+    // Save where the ball was so a water/OOB penalty can drop here.
+    previousShotStart.copy(physics.ball.position);
+
+    // Surface-specific shot modifiers (lies.js). Stubs to identity when not loaded.
+    const lie = game.lie;
+    const mods = _shotModifiers(lie);
+    const isPutt = !!(isPuttFlag ?? swing.state.putting);
+
     game.strokes += 1;
     game.inFlight = true;
     game.flightStart = performance.now();
+    tracer.hide();
+    camDir.setMode(isPutt ? 'putt' : 'flight');
 
-    // Audio + VFX on impact.
     audio.play(clubHitName(club.name));
     const bp0 = physics.ball.position;
-    divotSpray(scene, { x: bp0.x, y: bp0.y, z: bp0.z });
+    if (!isPutt) divotSpray(scene, { x: bp0.x, y: bp0.y, z: bp0.z });
     splashed = false;
     trail.start();
 
@@ -234,6 +398,17 @@ export function mountGolf(host, configOrOnExit) {
     };
     replay.frames.length = 0;
     replay.available = true;
+
+    // Stats capture — populated during flight and finalized in onBallSettled.
+    game.shotStats = {
+      startPos: [ballPos.x, ballPos.y, ballPos.z],
+      apex: ballPos.y,
+      firstBouncePos: null,
+      bounced: false,
+      ballSpeed: club.maxPower * Math.max(0.05, power),
+    };
+    // Clear the previous shot card so the HUD's identity check fires for the new shot.
+    game.lastShotStats = null;
 
     if (isMultiplayer && net) {
       const ball = physics.ball.position;
@@ -399,6 +574,15 @@ export function mountGolf(host, configOrOnExit) {
     }),
     getClubs: () => clubs,                  // legacy alias for fallback HUD
     getScorecard: () => game.scorecard,
+    getLie: () => {
+      // Prefer the engine's classifier when wired; otherwise infer from holeData regions.
+      if (typeof controller !== 'undefined' && typeof controller?.getLie === 'function') {
+        try { return controller.getLie(); } catch {}
+      }
+      const bp = physics.ball.position;
+      return inferLieFromHole(game.holeData, bp.x, bp.z);
+    },
+    getLastShotStats: () => game.lastShotStats || null,
     setClub: (name) => swing.setClub(name),
     onSelectClub: (name) => swing.setClub(name),
   };
@@ -525,22 +709,26 @@ export function mountGolf(host, configOrOnExit) {
   }
 
   function onHoleComplete() {
-    // Record locally (multiplayer scorecard updates also come from server).
-    if (game.scorecard) {
+    // For solo / vs-CPU, record locally — the server isn't in the loop.
+    // For multiplayer, the server is authoritative; we only write into our slot via the
+    // server's scorecard broadcast (handled in the connectGolf onEvent handler).
+    if (game.scorecard && !isMultiplayer) {
       let slot;
-      if (isMultiplayer) slot = game.mySlot;
-      else if (hasCpu && game.cpuPhase === 'cpu') slot = 1;
+      if (hasCpu && game.cpuPhase === 'cpu') slot = 1;
       else slot = 0;
       const me = game.scorecard.players[slot];
       if (me) me.scores[game.hole - 1] = game.strokes;
     }
     if (isMultiplayer && net) {
       net.sendHoleComplete(game.strokes);
+      // Advisory next-hole — server dedupes and only advances when both slots submitted.
+      // The active player's settle path also calls net.nextHole() so we're double-safe.
       if (game.hole < game.holeCount) {
         setTimeout(() => { try { net.nextHole(); } catch {} }, 1500);
       } else {
+        // Final hole: tell the server. The match-complete broadcast triggers showFinalSummary.
         showHudToast?.('Match complete!');
-        setTimeout(() => { if (!stopped) showFinalSummary(); }, 1600);
+        setTimeout(() => { try { net.sendMatchComplete(); } catch {} }, 800);
       }
       return;
     }
@@ -590,7 +778,7 @@ export function mountGolf(host, configOrOnExit) {
     let players, par, totalHoles;
     if (game.scorecard) {
       players = game.scorecard.players;
-      par = game.scorecard.par || DEMO_HOLES.slice(0, game.holeCount).map((h) => h.par);
+      par = game.scorecard.par || HOLES.slice(0, game.holeCount).map((h) => h.par);
       totalHoles = game.holeCount;
     } else {
       // Solo without scorecard: fall back to a single-player single-hole record.
@@ -639,6 +827,9 @@ export function mountGolf(host, configOrOnExit) {
     // Replay buffer is finalized when the shot ends.
     replay.available = replay.frames.length > 0 && !!replay.start;
 
+    // Finalize shot stats from the replay frames (apex, first-bounce, total, offline).
+    finalizeShotStats(bp);
+
     if (isMultiplayer && net && game.localActive) {
       net.sendShotResult({
         endPos: [bp.x, bp.y, bp.z],
@@ -657,10 +848,74 @@ export function mountGolf(host, configOrOnExit) {
     }
   }
 
+  function finalizeShotStats(bp) {
+    const s = game.shotStats;
+    if (!s || !s.startPos) { game.lastShotStats = null; return; }
+    const [sx, sy, sz] = s.startPos;
+    // Pin direction in XZ.
+    const px = pinWorld.x - sx;
+    const pz = pinWorld.z - sz;
+    const pinDist = Math.sqrt(px * px + pz * pz) || 1;
+    const dirX = px / pinDist;
+    const dirZ = pz / pinDist;
+
+    // Walk the replay frames to find apex (max y) and first bounce after liftoff
+    // (a frame where y goes from above ground threshold back near ground).
+    let apex = sy;
+    let firstBounceXZ = null;
+    const groundY = sy + 0.5;        // generous threshold: ball started at tee height
+    let inAir = false;
+    for (const f of replay.frames) {
+      if (f.y > apex) apex = f.y;
+      if (!inAir && f.y > groundY + 0.5) inAir = true;
+      if (inAir && firstBounceXZ == null && f.y <= groundY) {
+        firstBounceXZ = [f.x, f.z];
+      }
+    }
+    const ex = bp.x, ez = bp.z;
+    const totalDist = Math.sqrt((ex - sx) ** 2 + (ez - sz) ** 2);
+    const carryDist = firstBounceXZ
+      ? Math.sqrt((firstBounceXZ[0] - sx) ** 2 + (firstBounceXZ[1] - sz) ** 2)
+      : totalDist;
+    // Offline: perpendicular distance from the start→pin line at settle position.
+    // Positive = right of the aim line, negative = left.
+    const dx = ex - sx;
+    const dz = ez - sz;
+    const offline = dx * (-dirZ) + dz * (dirX); // 2D cross-product magnitude (signed)
+
+    game.lastShotStats = {
+      carry: carryDist,
+      total: totalDist,
+      apex: Math.max(0, apex - sy),
+      ballSpeed: s.ballSpeed,
+      offline,
+    };
+    game.shotStats = null;
+  }
+
   // ---- Multiplayer connection ----
   let net = null;
   let showHudToast = null;
   let setHudTurn = null;
+  let disconnectBanner = null;
+  function showDisconnectBanner(text) {
+    if (disconnectBanner) {
+      disconnectBanner.querySelector('[data-el="msg"]').textContent = text;
+      return;
+    }
+    disconnectBanner = document.createElement('div');
+    disconnectBanner.className = 'golf-disconnect';
+    disconnectBanner.innerHTML = `
+      <div class="golf-disconnect__dot"></div>
+      <div class="golf-disconnect__msg" data-el="msg"></div>
+      <button class="btn" data-action="back">Back to menu</button>
+    `;
+    disconnectBanner.querySelector('[data-el="msg"]').textContent = text;
+    disconnectBanner.querySelector('[data-action="back"]').addEventListener('click', () => onExit?.());
+    host.appendChild(disconnectBanner);
+    // Pause the loop so the match really does freeze.
+    game.paused = true;
+  }
   if (isMultiplayer) {
     setHudTurn = (t) => {
       if (unmountHud?.setTurn) unmountHud.setTurn(t);
@@ -676,27 +931,23 @@ export function mountGolf(host, configOrOnExit) {
       onEvent: (e) => {
         if (e.type === 'joined') {
           game.mySlot = e.slot;
-          game.localActive = (e.slot === 0); // host starts as active by default
-          setHudTurn?.(e.slot === 0 ? 'Waiting for opponent…' : 'Joined. Waiting for host…');
+          // localActive flips from the server's 'state' / 'turn' broadcast — don't guess.
+          game.localActive = false;
+          setHudTurn?.('Waiting for opponent…');
         } else if (e.type === 'start') {
           showHudToast?.('Match start!');
-          setHudTurn?.(game.localActive ? 'Your turn' : "Opponent's turn");
-        } else if (e.type === 'turn') {
+        } else if (e.type === 'state') {
+          // Authoritative snapshot — accept server's truth for turn + scorecard + hole.
           game.activeSlot = e.turn;
           game.localActive = (e.turn === game.mySlot);
-          setHudTurn?.(game.localActive ? 'Your turn' : "Opponent's turn");
-          // When it becomes your turn after a hole reset, ensure ball is on tee for new hole.
-        } else if (e.type === 'opponent-shot') {
-          // Stub: engine can play a swing animation here. For Phase 4 we just teleport on result.
-        } else if (e.type === 'opponent-shot-result') {
-          // Spectator: teleport the ball to the opponent's landing position.
-          const [x, y, z] = e.endPos || [0, 0, 0];
-          physics.ball.velocity.set(0, 0, 0);
-          physics.ball.angularVelocity.set(0, 0, 0);
-          physics.ball.position.set(x, Math.max(y, physics.BALL_RADIUS), z);
-          physics.ball.wakeUp();
-          game.strokes = e.strokes || game.strokes;
-        } else if (e.type === 'scorecard') {
+          if (typeof e.hole === 'number' && e.hole + 1 !== game.hole) {
+            // We're joining mid-match (or after a transition we missed).
+            const target = Math.min(game.holeCount, e.hole + 1);
+            if (target !== game.hole) {
+              loadHole(target);
+              swing.reset();
+            }
+          }
           if (game.scorecard && Array.isArray(e.scorecard)) {
             e.scorecard.forEach((perPlayer, slotIdx) => {
               if (game.scorecard.players[slotIdx]) {
@@ -704,6 +955,41 @@ export function mountGolf(host, configOrOnExit) {
               }
             });
           }
+          setHudTurn?.(game.localActive ? 'Your turn' : "Opponent's turn");
+        } else if (e.type === 'turn') {
+          game.activeSlot = e.turn;
+          game.localActive = (e.turn === game.mySlot);
+          setHudTurn?.(game.localActive ? 'Your turn' : "Opponent's turn");
+        } else if (e.type === 'opponent-shot') {
+          // Stub: engine can play a swing animation here. For Phase 4 we just teleport on result.
+        } else if (e.type === 'opponent-shot-result') {
+          // Spectator: teleport the ball to the opponent's landing position. Do NOT touch
+          // game.strokes — that field is the local player's display. Opponent stroke totals
+          // arrive via the server's scorecard broadcast, which writes into the scorecard
+          // slot, not the local strokes counter.
+          const [x, y, z] = e.endPos || [0, 0, 0];
+          physics.ball.velocity.set(0, 0, 0);
+          physics.ball.angularVelocity.set(0, 0, 0);
+          physics.ball.position.set(x, Math.max(y, physics.BALL_RADIUS), z);
+          physics.ball.wakeUp();
+        } else if (e.type === 'scorecard') {
+          // Server is authoritative for every player's per-hole scores, including ours.
+          if (game.scorecard && Array.isArray(e.scorecard)) {
+            e.scorecard.forEach((perPlayer, slotIdx) => {
+              if (game.scorecard.players[slotIdx]) {
+                game.scorecard.players[slotIdx].scores = perPlayer.slice();
+              }
+            });
+          }
+        } else if (e.type === 'match-complete') {
+          if (game.scorecard && Array.isArray(e.scorecard)) {
+            e.scorecard.forEach((perPlayer, slotIdx) => {
+              if (game.scorecard.players[slotIdx]) {
+                game.scorecard.players[slotIdx].scores = perPlayer.slice();
+              }
+            });
+          }
+          setTimeout(() => { if (!stopped) showFinalSummary(); }, 600);
         } else if (e.type === 'next-hole') {
           // server: hole index advanced; reset local state for the new hole
           const newHole = (e.hole || 0) + 1;
@@ -724,12 +1010,13 @@ export function mountGolf(host, configOrOnExit) {
               .finally(() => { game.flying = false; });
           }
         } else if (e.type === 'opponent-left') {
-          showHudToast?.('Opponent left');
-          setHudTurn?.('Opponent left');
+          setHudTurn?.('Opponent disconnected');
+          showDisconnectBanner('Opponent disconnected — match paused');
         } else if (e.type === 'error') {
           showHudToast?.(e.error || 'network error');
         } else if (e.type === 'closed') {
           setHudTurn?.('Disconnected');
+          showDisconnectBanner('Connection lost — match paused');
         }
       },
     });
