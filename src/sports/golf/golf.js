@@ -354,7 +354,16 @@ export function mountGolf(host, configOrOnExit) {
     // Materials.js DISPATCHER (water Reflector, elevated greens with cliffs, PBR maps).
     activeTerrain = buildHole(scene, physics, data, { applyMaterial });
     if (_decorateHole) {
-      try { activeDecor = _decorateHole(scene, data); } catch (err) { console.warn('[golf] decorateHole failed', err); }
+      try {
+        activeDecor = _decorateHole(scene, data, {
+          sunDir: visuals?.sunDirection,
+          fogColor: scene.fog?.color,
+          fogNear: 30,
+          fogFar: 110,
+          wind: data.wind,
+        });
+        host._environment = activeDecor;
+      } catch (err) { console.warn('[golf] decorateHole failed', err); }
     }
     teeWorld.copy(activeTerrain.teeWorld);
     pinWorld.copy(activeTerrain.pinWorld);
@@ -1294,12 +1303,22 @@ export function mountGolf(host, configOrOnExit) {
       }
     }
 
-    // Trail + tracer + ambient wind + water ripples + golfer animation.
+    // Trail + tracer + ambient wind + water ripples + golfer animation + grass.
     trail.update(dt);
     tracer.update();
     if (golfer?.update) golfer.update(dt);
     audio.tickAmbient(dt);
     try { tickWater(dt); } catch {}
+    if (activeDecor?.tick) {
+      try {
+        activeDecor.tick(dt, {
+          ballPos: bp,
+          cameraPos: camera.position,
+          sunDir: visuals?.sunDirection,
+          wind: game.wind?.speed ?? 0.7,
+        });
+      } catch {}
+    }
 
     // Cup sensor: when ball center is within HOLE_RADIUS * 1.5 in XZ of the pin AND
     // its vertical speed is below 2 m/s, count it as holed and snap-stop. This catches
@@ -1386,6 +1405,8 @@ export function mountGolf(host, configOrOnExit) {
     endTurn() { net?.endTurn(); },
     replayLastShot() { return replayLastShot(); },
     canReplay() { return replay.available && !replay.playing; },
+    setGraphicsQuality(level) { setGraphicsQuality(level); },
+    getGraphicsQuality() { return game.qualityLevel; },
     // ---- Phase 5+6 polish surface ----
     getBallPos() {
       const p = physics.ball.position;

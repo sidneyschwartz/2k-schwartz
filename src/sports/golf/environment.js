@@ -1,9 +1,18 @@
-// Per-hole environment dressing: low-poly trees, tee signage, and a cinematic
-// camera flyover for hole transitions. Trees use InstancedMesh for the trunk
-// + crown so a few hundred fit cheap. Sign is a small board on a post.
+// Per-hole environment dressing: low-poly trees, tee signage, a cinematic
+// camera flyover for hole transitions, and (new) an instanced grass-blade
+// carpet that follows the ball.
+//
+// decorateHole(scene, holeData, { ballRef, camera, sunDir, wind }) returns an
+// env handle with:
+//   tick(dt, { ballPos, cameraPos, wind })  — call each frame
+//   setGrassDensity(d)                       — 0..1, called by quality.js
+//   setTreeDensity(d)                        — 0..1, called by quality.js
+//   setWaterReflection(enabled, size)        — stub for future water swap
+//   dispose()                                — frees all decor
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { createGrassPatch } from './grass.js';
 
 // ---------- helpers ----------
 
@@ -266,10 +275,86 @@ function addTeeSign(scene, holeData) {
 
 // ---------- public API ----------
 
-export function decorateHole(scene, holeData) {
+// `opts` may include { sunDir, fogColor, fogNear, fogFar, wind } to seed the
+// grass shader. The engine should call `env.tick(dt, { ballPos, cameraPos })`
+// each frame so the grass patch follows the ball and the wind animates.
+export function decorateHole(scene, holeData, opts = {}) {
   const trees = scatterTrees(scene, holeData);
   const sign = addTeeSign(scene, holeData);
-  return { trees, sign };
+
+  // Instanced grass patch around the ball. Uses InstancedMesh — one draw call
+  // for up to several thousand blades. Frustum-culled by its bounding sphere.
+  let grass = null;
+  try {
+    grass = createGrassPatch({
+      count: 5000,
+      radius: 20,
+      sunDir: opts.sunDir ?? new THREE.Vector3(0.5, 1, 0.5).normalize(),
+      fogColor: opts.fogColor ?? new THREE.Color(0xbcd4e6),
+      fogNear: opts.fogNear ?? 30,
+      fogFar:  opts.fogFar  ?? 110,
+    });
+    grass.setCenter(new THREE.Vector3(holeData.tee.x, 0.02, holeData.tee.z));
+    scene.add(grass.mesh);
+  } catch (err) {
+    console.warn('[environment] grass init failed', err);
+  }
+
+  let grassDensity = 1.0;
+  let treeDensity = 1.0;
+  let windSpeed = opts.wind?.speed ?? 0.7;
+
+  function tick(dt, ctx = {}) {
+    if (grass) {
+      if (ctx.ballPos) {
+        grass.setCenter(new THREE.Vector3(ctx.ballPos.x, 0.02, ctx.ballPos.z));
+      }
+      grass.tick(dt, {
+        cameraPos: ctx.cameraPos,
+        sunDir: ctx.sunDir,
+        wind: ctx.wind ?? windSpeed,
+      });
+    }
+  }
+
+  function setGrassDensity(d) {
+    grassDensity = Math.max(0, Math.min(1, d));
+    if (grass) grass.setDensity(grassDensity);
+  }
+  function setTreeDensity(d) {
+    treeDensity = Math.max(0, Math.min(1, d));
+    // Trees were rendered as merged geometry — toggle visibility for now.
+    // (A finer-grained cut would re-scatter at lower density; not worth the cost yet.)
+    if (trees?.meshes) {
+      for (const m of trees.meshes) m.visible = treeDensity > 0;
+    } else {
+      if (trees?.trunks) trees.trunks.visible = treeDensity > 0;
+      if (trees?.crowns) trees.crowns.visible = treeDensity > 0;
+    }
+  }
+  function setWaterReflection(_enabled, _size) {
+    // materials.js owns the water reflector swap; this stub is here so the
+    // quality.applyQuality() call signature works without errors.
+  }
+
+  function dispose() {
+    if (grass) { scene.remove(grass.mesh); try { grass.dispose(); } catch {} }
+    if (sign?.parent) scene.remove(sign);
+    if (trees?.meshes) for (const m of trees.meshes) scene.remove(m);
+    else {
+      if (trees?.trunks) scene.remove(trees.trunks);
+      if (trees?.crowns) scene.remove(trees.crowns);
+    }
+  }
+
+  return {
+    trees, sign, grass,
+    tick,
+    setGrassDensity,
+    setTreeDensity,
+    setWaterReflection,
+    dispose,
+  };
 }
 
 // ---------- flyover ----------
