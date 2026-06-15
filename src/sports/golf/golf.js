@@ -333,7 +333,28 @@ export function mountGolf(host, configOrOnExit) {
     }
   }
   function onReplayKey(e) {
-    if (e.code === 'KeyR' && !e.repeat) replayLastShot();
+    if (e.repeat) return;
+    if (e.code === 'KeyR') {
+      replayLastShot();
+    } else if (e.code === 'KeyM') {
+      // Expand to fullscreen for ~3s when pressed while panel is small; otherwise toggle.
+      if (!minimap) return;
+      if (minimap.expanded) minimap.setExpanded(false);
+      else {
+        minimap.setExpanded(true);
+        clearTimeout(onReplayKey._mapTimer);
+        onReplayKey._mapTimer = setTimeout(() => { minimap?.setExpanded(false); }, 3000);
+      }
+    } else if (e.code === 'KeyP' || e.code === 'Escape') {
+      if (!settingsUi) return;
+      if (settingsUi.isOpen()) {
+        game.paused = false;
+        settingsUi.close();
+      } else {
+        game.paused = true;
+        settingsUi.open();
+      }
+    }
   }
   window.addEventListener('keydown', onReplayKey);
 
@@ -511,6 +532,7 @@ export function mountGolf(host, configOrOnExit) {
         setTimeout(() => { try { net.nextHole(); } catch {} }, 1500);
       } else {
         showHudToast?.('Match complete!');
+        setTimeout(() => { if (!stopped) showFinalSummary(); }, 1600);
       }
       return;
     }
@@ -542,24 +564,34 @@ export function mountGolf(host, configOrOnExit) {
         if (ai) ai.holeData = game.holeData;
         swing.reset();
       }, 1800);
-    } else if (hasCpu) {
-      // Final hole done — show match-complete banner.
-      const totals = game.scorecard.players.map((p) =>
-        p.scores.reduce((a, b) => a + (b || 0), 0));
-      const youTotal = totals[0];
-      const cpuTotal = totals[1];
-      const verdict = youTotal < cpuTotal ? 'You win!'
-        : youTotal > cpuTotal ? `${game.aiName} wins.` : 'Tied.';
-      setTimeout(() => {
-        if (stopped) return;
-        completeBanner.innerHTML = `<div>Match complete</div>
-          <div style="margin-top:8px;font-size:1rem;opacity:0.9;">
-            You: ${youTotal} &nbsp;·&nbsp; ${game.aiName}: ${cpuTotal}
-          </div>
-          <div style="margin-top:6px;font-size:1.2rem;">${verdict}</div>`;
-        completeBanner.style.display = 'block';
-      }, 1200);
+    } else {
+      // Final hole done in solo or vs CPU — show the polished round summary.
+      setTimeout(() => { if (!stopped) showFinalSummary(); }, 1200);
     }
+  }
+
+  function showFinalSummary() {
+    // Build a scorecard if solo (no MP/CPU): synthesize a single-player card from history.
+    let players, par, totalHoles;
+    if (game.scorecard) {
+      players = game.scorecard.players;
+      par = game.scorecard.par || DEMO_HOLES.slice(0, game.holeCount).map((h) => h.par);
+      totalHoles = game.holeCount;
+    } else {
+      // Solo without scorecard: fall back to a single-player single-hole record.
+      players = [{ name: character?.name || 'You', scores: [game.strokes] }];
+      par = [game.par];
+      totalHoles = 1;
+    }
+    completeBanner.style.display = 'none';
+    showRoundSummary(host, {
+      players, par, totalHoles,
+      onPlayAgain: () => {
+        // Reload by quickly bouncing the host's _golfController out and back via onExit.
+        onExit?.();
+      },
+      onExit: () => onExit?.(),
+    });
   }
 
   // ---- CPU turn machinery (single-player vs CPU) ----
@@ -706,6 +738,24 @@ export function mountGolf(host, configOrOnExit) {
       return;
     }
 
+    // Putting-mode auto-switch: when the ball is on the green and at rest, switch
+    // to the Putter and enable the slower power-only meter. Only re-evaluate during
+    // the idle phase so we don't pull the rug out mid-swing.
+    if (swing.state.phase === 'idle' && !game.inFlight && !game.complete) {
+      const greenRegion = game.holeData?.regions?.find((r) => r.type === 'green');
+      if (greenRegion) {
+        const ddx = physics.ball.position.x - greenRegion.x;
+        const ddz = physics.ball.position.z - greenRegion.z;
+        const onGreen = (ddx * ddx + ddz * ddz) < (greenRegion.r * greenRegion.r);
+        if (onGreen) {
+          if (swing.club.name !== 'Putter') swing.setClub('Putter');
+          if (!swing.state.putting) swing.setPutting(true);
+        } else if (swing.state.putting) {
+          swing.setPutting(false);
+        }
+      }
+    }
+
     swing.update(dt);
     if (!replay.playing) {
       physics.step(dt);
@@ -833,6 +883,19 @@ export function mountGolf(host, configOrOnExit) {
     endTurn() { net?.endTurn(); },
     replayLastShot() { return replayLastShot(); },
     canReplay() { return replay.available && !replay.playing; },
+    // ---- Phase 5+6 polish surface ----
+    getBallPos() {
+      const p = physics.ball.position;
+      return { x: p.x, y: p.y, z: p.z };
+    },
+    getHoleData() { return game.holeData; },
+    getScorecard() { return game.scorecard; },
+    setCameraOffset(d) { if (camState) camState.distance = d; },
+    setPaused(b) { game.paused = !!b; },
+    setMuted(b) { try { audio.setMuted(!!b); } catch {} },
+    setMinimapVisible(b) { minimap?.setVisible(b); },
+    setAimLineVisible(b) { game.aimLineEnabled = !!b; },
+    openSettings() { game.paused = true; settingsUi?.open(); },
   };
   host._golfController = controller;
 
@@ -844,6 +907,8 @@ export function mountGolf(host, configOrOnExit) {
     window.removeEventListener('keydown', onReplayKey);
     try { unmountHud?.(); } catch {}
     try { net?.close(); } catch {}
+    try { minimap?.unmount(); } catch {}
+    try { settingsUi?.unmount(); } catch {}
     try { activeTerrain?.dispose(); } catch {}
     try { physics.dispose(); } catch {}
     try { disposeScene(); } catch {}

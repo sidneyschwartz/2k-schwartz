@@ -107,5 +107,5 @@ export function createScene(host) {
     if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
   }
 
-  return { scene, camera, renderer, sun, followBall, dispose };
+  return { scene, camera, renderer, sun, followBall, dispose, camState };
 }
