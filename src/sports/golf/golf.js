@@ -22,6 +22,13 @@ import { mountMinimap } from './minimap.js';
 import { mountSettings, loadSettings } from './settings.js';
 import { showRoundSummary } from './round-summary.js';
 
+// Optional: art agent provides holeFlyover() in environment.js. Resolved lazily so
+// older builds without environment.js don't crash.
+let _holeFlyover = null;
+import('./environment.js')
+  .then((mod) => { _holeFlyover = mod.holeFlyover ?? null; })
+  .catch(() => { _holeFlyover = null; });
+
 const HOLE_RADIUS = 0.108;        // real golf hole radius (m)
 
 // Try to resolve the art-agent material factories if present. We pass an applyMaterial
@@ -103,6 +110,7 @@ export function mountGolf(host, configOrOnExit) {
     complete: false,
     inFlight: false,
     paused: false,
+    flying: false,        // true while a holeFlyover camera animation is running
     aimLineEnabled: true,
     wind: { speed: 0, dir: 0, dirDeg: 0 },
     flightStart: 0,
@@ -552,7 +560,7 @@ export function mountGolf(host, configOrOnExit) {
     }
     // Either solo (no CPU) or CPU just finished this hole — advance to next.
     if (game.hole < game.holeCount) {
-      setTimeout(() => {
+      setTimeout(async () => {
         if (stopped) return;
         const next = game.hole + 1;
         game.strokes = 0;
@@ -563,6 +571,13 @@ export function mountGolf(host, configOrOnExit) {
         loadHole(next);
         if (ai) ai.holeData = game.holeData;
         swing.reset();
+        // Cinematic flyover from above the new pin down to a tee-shot framing.
+        if (_holeFlyover && !stopped) {
+          game.flying = true;
+          try { await _holeFlyover(camera, scene, game.holeData, 2800); }
+          catch {}
+          finally { game.flying = false; }
+        }
       }, 1800);
     } else {
       // Final hole done in solo or vs CPU — show the polished round summary.
@@ -694,7 +709,7 @@ export function mountGolf(host, configOrOnExit) {
           const newHole = (e.hole || 0) + 1;
           game.strokes = 0;
           game.complete = false;
-          loadHole(newHole);   // rebuilds terrain + repositions ball on new tee
+          loadHole(newHole);
           swing.reset();
           completeBanner.style.display = 'none';
           resetBtn.style.display = 'none';
@@ -702,6 +717,12 @@ export function mountGolf(host, configOrOnExit) {
           game.localActive = (e.turn === game.mySlot);
           setHudTurn?.(game.localActive ? 'Your turn' : "Opponent's turn");
           showHudToast?.(`Hole ${newHole}`);
+          if (_holeFlyover) {
+            game.flying = true;
+            _holeFlyover(camera, scene, game.holeData, 2800)
+              .catch(() => {})
+              .finally(() => { game.flying = false; });
+          }
         } else if (e.type === 'opponent-left') {
           showHudToast?.('Opponent left');
           setHudTurn?.('Opponent left');
@@ -855,10 +876,12 @@ export function mountGolf(host, configOrOnExit) {
       }
     }
 
-    followBall(ballMesh, pinTarget, dt, {
-      aimYaw: swing.state.aimYaw,
-      inFlight: game.inFlight,
-    });
+    if (!game.flying) {
+      followBall(ballMesh, pinTarget, dt, {
+        aimYaw: swing.state.aimYaw,
+        inFlight: game.inFlight,
+      });
+    }
 
     renderer.render(scene, camera);
   }

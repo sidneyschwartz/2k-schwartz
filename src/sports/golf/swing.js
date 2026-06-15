@@ -29,15 +29,18 @@ export function createSwingController({ onSwingStart, onShot } = {}) {
     aimYaw: 0,           // rad
     stance: { x: 0, y: 0 }, // -1..1 fine-tune
     clubName: clubs[0].name,
+    putting: false,      // when true: skip accuracy phase, slow power meter for fine control
   };
 
   function getClub() { return clubByName(state.clubName); }
   function setClub(name) { state.clubName = name; }
   function setAim(rad) { state.aimYaw = rad; }
+  function setPutting(b) { state.putting = !!b; }
 
   function getMeter() {
     return {
       phase: state.phase,
+      putting: state.putting,
       power: state.phase === 'power-rising' ? state.powerMeter : state.power,
       lockedPower: state.power,
       accuracy: state.accuracyMeter,
@@ -86,6 +89,14 @@ export function createSwingController({ onSwingStart, onShot } = {}) {
       onSwingStart?.();
     } else if (state.phase === 'power-rising') {
       state.power = state.powerMeter;
+      // Putting mode: skip accuracy entirely. The locked power IS the shot.
+      if (state.putting) {
+        state.accuracyError = 0;
+        state.accuracyMeter = 0;
+        state.phase = 'done';
+        emitShot();
+        return;
+      }
       state.phase = 'power-locked';
       state.elapsed = 0;
     } else if (state.phase === 'accuracy') {
@@ -159,8 +170,9 @@ export function createSwingController({ onSwingStart, onShot } = {}) {
     pollKeys(dt);
     state.elapsed += dt;
     if (state.phase === 'power-rising') {
-      // ping-pong 0..1 with period 2 * POWER_RISE_SECONDS
-      const v = state.powerMeter + state.powerDir * (dt / POWER_RISE_SECONDS);
+      // ping-pong 0..1. Putting mode runs ~2.2x slower for fine control.
+      const period = state.putting ? POWER_RISE_SECONDS * 2.2 : POWER_RISE_SECONDS;
+      const v = state.powerMeter + state.powerDir * (dt / period);
       if (v >= 1) { state.powerMeter = 1; state.powerDir = -1; }
       else if (v <= 0) { state.powerMeter = 0; state.powerDir = 1; }
       else state.powerMeter = v;
@@ -203,6 +215,7 @@ export function createSwingController({ onSwingStart, onShot } = {}) {
     get aim() { return state.aimYaw; },
     setClub,
     setAim,
+    setPutting,
     getMeter,
     update,
     reset,
