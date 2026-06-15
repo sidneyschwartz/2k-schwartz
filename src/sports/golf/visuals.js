@@ -1,6 +1,6 @@
-// Visual polish: procedural sky, ACES tonemapping, bloom, SMAA, shadow tuning.
-// Returns a composer the engine can render through. Falls back gracefully if
-// post-processing imports fail (shouldn't with vite + three, but defensive).
+// Visual polish: procedural sky, IBL via PMREM (image-based PBR lighting +
+// reflections sourced from the sky itself — no HDRI download needed),
+// ACES tonemapping, bloom, SSAO, SMAA, shadow tuning.
 
 import * as THREE from 'three';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
@@ -8,6 +8,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
+import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
 // Sun config used by both sky and directional light so they agree.
@@ -78,15 +79,38 @@ function findOrAddSunLight(scene, sunDir) {
 export function applyVisuals(scene, renderer, camera = null) {
   // Renderer-side polish.
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.0;
+  renderer.toneMappingExposure = 1.05;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Crisper PBR with physically-correct light falloff.
+  renderer.physicallyCorrectLights = true;
 
   // Sky + sun.
-  const { sun } = addSky(scene);
+  const { sky, sun } = addSky(scene);
   const sunDir = sun.clone().normalize();
   const sunLight = findOrAddSunLight(scene, sunDir);
+
+  // ---- IBL via PMREM: bake the procedural Sky into an env map so all PBR
+  // materials pick up real reflection + ambient color from the sky. No HDRI
+  // download needed; we self-source from the in-scene Sky shader.
+  let pmremRT = null;
+  try {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+    // Render the Sky into the PMREM in a temp mini-scene so we don't include
+    // any not-yet-loaded scene props (which would still be undefined here).
+    const skyScene = new THREE.Scene();
+    const skyClone = sky.clone();
+    // Shallow-clone the uniforms so we don't mutate the live sky.
+    skyClone.material = sky.material;
+    skyScene.add(skyClone);
+    pmremRT = pmrem.fromScene(skyScene, 0.04);
+    scene.environment = pmremRT.texture;
+    pmrem.dispose();
+  } catch (err) {
+    console.warn('[visuals] PMREM IBL failed; PBR will use sun+ambient only', err);
+  }
 
   // Mild fog for distance haze; matches sky horizon. Pushed back so a 145m par-3
   // doesn't disappear into white.
@@ -97,12 +121,25 @@ export function applyVisuals(scene, renderer, camera = null) {
   let composer = null;
   let bloomPass = null;
   let smaaPass = null;
+  let ssaoPass = null;
   const size = renderer.getSize(new THREE.Vector2());
 
   if (camera) {
     composer = new EffectComposer(renderer);
     composer.setSize(size.x, size.y);
     composer.addPass(new RenderPass(scene, camera));
+
+    // SSAO — subtle ambient occlusion so the figure, sand, and rough geometry
+    // ground into the terrain. Tuned mild so we don't get the dirty-fingerprint
+    // look on the open fairway.
+    try {
+      ssaoPass = new SSAOPass(scene, camera, size.x, size.y);
+      ssaoPass.kernelRadius = 0.6;
+      ssaoPass.minDistance = 0.001;
+      ssaoPass.maxDistance = 0.04;
+      ssaoPass.output = SSAOPass.OUTPUT.Default;
+      composer.addPass(ssaoPass);
+    } catch (err) { console.warn('[visuals] SSAO unavailable', err); }
 
     // Bloom kept very gentle so it doesn't wash out the horizon line.
     bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.12, 0.7, 0.92);
@@ -119,6 +156,7 @@ export function applyVisuals(scene, renderer, camera = null) {
     if (composer) composer.setSize(w, h);
     if (bloomPass) bloomPass.setSize(w, h);
     if (smaaPass) smaaPass.setSize(w * renderer.getPixelRatio(), h * renderer.getPixelRatio());
+    if (ssaoPass) ssaoPass.setSize(w, h);
   }
 
   function render() {
@@ -130,8 +168,10 @@ export function applyVisuals(scene, renderer, camera = null) {
     composer,
     bloomPass,
     smaaPass,
+    ssaoPass,
     sunLight,
     sunDirection: sunDir,
+    envMap: pmremRT?.texture ?? null,
     render,
     setSize,
   };
