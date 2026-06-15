@@ -4,7 +4,7 @@
 
 import { chromium } from 'playwright';
 
-const URL = process.env.URL || 'http://localhost:3000/?debug=1';
+const URL = process.env.URL || 'http://localhost:3000/?golf=1&debug=1';
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const errors = [];

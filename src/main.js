@@ -1,12 +1,13 @@
-// DEV: boot straight into solo Golf so we can see live progress without clicking
-// through the menu + lobby every reload. To restore the menu flow, set
-// `BOOT_DIRECT_TO_GOLF = false` (or remove this guard once the bug-hunt is done).
+// Menu router. Golf is the only sport for now: Menu → Golf → lobby (mode + round
+// length + character) → game.
+//
+// Dev shortcut: append ?golf=1 to the URL to skip the menu and boot straight into a
+// solo round (handy for live iteration). Otherwise the menu shows.
 
-import { mountTennis } from './sports/tennis.js';
 import { mountGolf } from './sports/golf/golf.js';
 import { showLobby } from './sports/golf/lobby.js';
 
-const BOOT_DIRECT_TO_GOLF = true;
+const BOOT_DIRECT = new URLSearchParams(location.search).get('golf') === '1';
 
 const menu = document.getElementById('menu');
 const host = document.getElementById('sport-host');
@@ -18,44 +19,34 @@ function showMenu() {
   host.innerHTML = '';
   host.classList.add('hidden');
   menu.classList.remove('hidden');
-  if (BOOT_DIRECT_TO_GOLF) bootGolf();
 }
 
-function bootGolf() {
+async function startGolf() {
+  menu.classList.add('hidden');
+  host.classList.remove('hidden');
+  host.innerHTML = '';
+  const cfg = await showLobby(host);
+  if (!cfg) { showMenu(); return; }     // user backed out of the lobby
+  host.innerHTML = '';
+  unmount = mountGolf(host, { ...cfg, onExit: showMenu });
+}
+
+function bootDirectGolf() {
   menu.classList.add('hidden');
   host.classList.remove('hidden');
   host.innerHTML = '';
   unmount = mountGolf(host, {
     mode: 'single',
     character: { id: 'tiger', name: 'Tiger Woods' },
-    onExit: () => {
-      // On exit, re-boot directly into golf so we never get stuck on an empty page.
-      if (BOOT_DIRECT_TO_GOLF) bootGolf();
-      else showMenu();
-    },
+    onExit: showMenu,
   });
 }
 
-async function showSport(sport) {
-  menu.classList.add('hidden');
-  host.classList.remove('hidden');
-  host.innerHTML = '';
-  if (sport === 'tennis') {
-    unmount = mountTennis(host, showMenu);
-    return;
-  }
-  if (sport === 'golf') {
-    const cfg = await showLobby(host);
-    if (!cfg) { showMenu(); return; }
-    host.innerHTML = '';
-    unmount = mountGolf(host, { ...cfg, onExit: showMenu });
-  }
-}
-
 document.querySelectorAll('.sport:not(.disabled)').forEach((b) => {
-  b.addEventListener('click', () => showSport(b.dataset.sport));
+  b.addEventListener('click', () => {
+    if (b.dataset.sport === 'golf') startGolf();
+  });
 });
 
-// Boot.
-if (BOOT_DIRECT_TO_GOLF) bootGolf();
+if (BOOT_DIRECT) bootDirectGolf();
 else showMenu();

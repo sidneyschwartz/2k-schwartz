@@ -8,7 +8,7 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 
-const URL = process.env.URL || 'http://localhost:3000/?debug=1';
+const URL = process.env.URL || 'http://localhost:3000/?golf=1&debug=1';
 const SHOT_PATH = 'tests/smoke-shot.png';
 
 const browser = await chromium.launch({ headless: true });

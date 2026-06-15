@@ -7,7 +7,7 @@
 
 import { chromium } from 'playwright';
 
-const URL = process.env.URL || 'http://localhost:3000/?debug=1';
+const URL = process.env.URL || 'http://localhost:3000/?golf=1&debug=1';
 const HOLES_TO_PLAY = 3;
 
 const browser = await chromium.launch({ headless: true });
