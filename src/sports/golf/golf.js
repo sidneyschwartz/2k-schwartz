@@ -429,28 +429,27 @@ export function mountGolf(host, configOrOnExit) {
     const baseYaw = Math.atan2(toPinX, toPinZ);
     const yaw = baseYaw + aimYaw + (stance?.x ?? 0) * 0.05;
 
-    const speed = club.maxPower * Math.max(0.05, power);
-    const loft = club.loft;
-    // ground-plane direction
+    // Surface power penalty + sand-extra-loft applied here.
+    const adjPower = power * mods.powerMul;
+    const speed = club.maxPower * Math.max(0.05, adjPower);
+    const loft = isPutt ? 0 : (club.loft + mods.loftBias);
     const dirX = Math.sin(yaw);
     const dirZ = Math.cos(yaw);
-    // initial velocity
     const horiz = speed * Math.cos(loft);
     const vy = speed * Math.sin(loft);
     physics.ball.wakeUp();
     physics.ball.velocity.set(dirX * horiz, vy, dirZ * horiz);
 
-    // Spin: backspin around an axis perpendicular to flight direction (in XZ plane,
-    // pointing "left" of travel). Sidespin is accuracy error * sidespinScale around Y.
-    const sideAxisX = -dirZ;
-    const sideAxisZ = dirX;
-    const backspin = club.backspin;
-    const sidespin = accuracyError * club.sidespinScale * 400; // rad/s, generous
-    physics.ball.angularVelocity.set(
-      sideAxisX * backspin,
-      sidespin,
-      sideAxisZ * backspin,
-    );
+    // Putts: no spin. Otherwise spin scales with surface (rough/sand kills it).
+    if (isPutt) {
+      physics.ball.angularVelocity.set(0, 0, 0);
+    } else {
+      const sideAxisX = -dirZ;
+      const sideAxisZ = dirX;
+      const backspin = club.backspin * mods.spinMul;
+      const sidespin = accuracyError * club.sidespinScale * 400 * mods.spinMul;
+      physics.ball.angularVelocity.set(sideAxisX * backspin, sidespin, sideAxisZ * backspin);
+    }
 
     swing.reset();
     replay.shotStart = performance.now();
@@ -824,17 +823,32 @@ export function mountGolf(host, configOrOnExit) {
 
   // Called when the ball settles (after a shot stops moving).
   function onBallSettled(bp) {
-    // Replay buffer is finalized when the shot ends.
     replay.available = replay.frames.length > 0 && !!replay.start;
+    // Detect lie for next shot (drives HUD + lies.js shotModifiers).
+    game.lie = lieAt(bp.x, bp.z, game.holeData);
+    tracer.setFrames(replay.frames);
+    camDir.setMode('landing');
+    setTimeout(() => { if (!stopped) camDir.setMode(game.lie === 'green' ? 'putt' : 'chase'); }, 1800);
 
-    // Finalize shot stats from the replay frames (apex, first-bounce, total, offline).
     finalizeShotStats(bp);
 
+    // Water / OOB penalty
+    if (game.lie === 'water' || game.lie === 'oob') {
+      game.strokes += 1;
+      physics.ball.velocity.set(0, 0, 0);
+      physics.ball.angularVelocity.set(0, 0, 0);
+      physics.ball.position.set(
+        previousShotStart.x,
+        previousShotStart.y + physics.BALL_RADIUS,
+        previousShotStart.z - 1.5,
+      );
+      physics.ball.wakeUp();
+      game.lie = lieAt(physics.ball.position.x, physics.ball.position.z, game.holeData);
+      showHudToast?.('Water / OOB · +1 penalty — drop near last shot');
+    }
+
     if (isMultiplayer && net && game.localActive) {
-      net.sendShotResult({
-        endPos: [bp.x, bp.y, bp.z],
-        strokes: game.strokes,
-      });
+      net.sendShotResult({ endPos: [bp.x, bp.y, bp.z], strokes: game.strokes });
       if (!game.complete) {
         net.endTurn();
         game.localActive = false;
@@ -842,10 +856,7 @@ export function mountGolf(host, configOrOnExit) {
       }
       return;
     }
-    // CPU: if it's the CPU's turn and the hole isn't done, schedule another CPU shot.
-    if (hasCpu && game.cpuPhase === 'cpu' && !game.complete) {
-      scheduleCpuShot();
-    }
+    if (hasCpu && game.cpuPhase === 'cpu' && !game.complete) scheduleCpuShot();
   }
 
   function finalizeShotStats(bp) {
@@ -1042,7 +1053,7 @@ export function mountGolf(host, configOrOnExit) {
 
     if (game.paused) {
       // Render the static frame so the scene stays visible behind the settings overlay.
-      renderer.render(scene, camera);
+      if (visuals?.composer) visuals.composer.render(); else renderer.render(scene, camera);
       return;
     }
 
@@ -1132,9 +1143,12 @@ export function mountGolf(host, configOrOnExit) {
       }
     }
 
-    // Trail update + ambient wind.
+    // Trail + tracer + ambient wind + water ripples + golfer animation.
     trail.update(dt);
+    tracer.update();
+    if (golfer?.update) golfer.update(dt);
     audio.tickAmbient(dt);
+    try { tickWater(dt); } catch {}
 
     // Cup sensor: when ball center is within HOLE_RADIUS * 1.5 in XZ of the pin AND
     // its vertical speed is below 2 m/s, count it as holed and snap-stop. This catches
@@ -1144,9 +1158,10 @@ export function mountGolf(host, configOrOnExit) {
       const dx = bp.x - pinWorld.x;
       const dz = bp.z - pinWorld.z;
       const distXZ = Math.sqrt(dx * dx + dz * dz);
-      const vy = Math.abs(physics.ball.velocity.y);
-      const nearGround = bp.y < pinWorld.y + physics.BALL_RADIUS * 6;
-      if (distXZ < HOLE_RADIUS * 1.5 && nearGround && vy < 2) {
+      const speed = physics.ball.velocity.length();
+      const nearGround = bp.y < pinWorld.y + physics.BALL_RADIUS * 5;
+      // Strict cup: must be inside the real cup radius AND not blasting through too fast.
+      if (distXZ < CUP_CATCH_RADIUS && nearGround && speed < CUP_PUTT_SPEED_LIMIT) {
         // Snap to bottom of cup
         physics.ball.velocity.set(0, 0, 0);
         physics.ball.angularVelocity.set(0, 0, 0);
@@ -1164,13 +1179,15 @@ export function mountGolf(host, configOrOnExit) {
     }
 
     if (!game.flying) {
-      followBall(ballMesh, pinTarget, dt, {
+      camDir.update(dt, {
+        ballMesh, pinTarget,
         aimYaw: swing.state.aimYaw,
         inFlight: game.inFlight,
+        putting: swing.state.putting,
       });
     }
 
-    renderer.render(scene, camera);
+    if (visuals?.composer) visuals.composer.render(); else renderer.render(scene, camera);
   }
   rafId = requestAnimationFrame(tick);
 
@@ -1200,6 +1217,9 @@ export function mountGolf(host, configOrOnExit) {
     },
     getHoleData() { return game.holeData; },
     getScorecard() { return game.scorecard; },
+    getLie() { return game.lie || 'fairway'; },
+    getLieLabel() { return _LIE_LABELS[game.lie] || game.lie || ''; },
+    getLastShotStats() { return game.lastShotStats || null; },
     setCameraOffset(d) { if (camState) camState.distance = d; },
     setPaused(b) { game.paused = !!b; },
     setMuted(b) { try { audio.setMuted(!!b); } catch {} },
@@ -1220,6 +1240,8 @@ export function mountGolf(host, configOrOnExit) {
     try { minimap?.unmount(); } catch {}
     try { settingsUi?.unmount(); } catch {}
     try { activeTerrain?.dispose(); } catch {}
+    try { disposeDecor(); } catch {}
+    try { tracer.dispose(); } catch {}
     try { physics.dispose(); } catch {}
     try { disposeScene(); } catch {}
     try { trail.dispose(); } catch {}

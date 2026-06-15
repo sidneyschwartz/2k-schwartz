@@ -273,3 +273,80 @@ function mapSurface(type) {
       return 'fairway';
   }
 }
+
+// ---------- public lie detection ----------
+// Returns the surface the ball is sitting on given (x, z) and a hole's region list.
+// Priority order: green > water > sand > tee > fairway > rough (explicit fill or default).
+// "Rough" wins as the fallback for any in-bounds-but-not-otherwise-tagged ground.
+// Returns 'oob' if the point is far outside the hole's playing corridor.
+export function lieAt(x, z, holeData) {
+  if (!holeData) return 'fairway';
+
+  const checkGreen   = (r) => r.type === 'green'   && shapeContains(r, x, z);
+  const checkWater   = (r) => r.type === 'water'   && shapeContains(r, x, z);
+  const checkSand    = (r) => r.type === 'sand'    && shapeContains(r, x, z);
+  const checkTee     = (r) => r.type === 'tee'     && shapeContains(r, x, z);
+  const checkFairway = (r) => r.type === 'fairway' && shapeContains(r, x, z);
+  const checkRough   = (r) => r.type === 'rough'   && r.shape !== 'fill' && shapeContains(r, x, z);
+
+  for (const r of holeData.regions || []) if (checkGreen(r))   return 'green';
+  for (const r of holeData.regions || []) if (checkWater(r))   return 'water';
+  for (const r of holeData.regions || []) if (checkSand(r))    return 'sand';
+  for (const r of holeData.regions || []) if (checkTee(r))     return 'tee';
+  for (const r of holeData.regions || []) if (checkFairway(r)) return 'fairway';
+  for (const r of holeData.regions || []) if (checkRough(r))   return 'rough';
+
+  // Implicit fill rough — anywhere reasonably near the hole corridor.
+  if (holeData.regions?.some((r) => r.type === 'rough' && r.shape === 'fill')) {
+    // OOB only if very far from any region center
+    const corridorX = Math.max(
+      Math.abs(x - (holeData.tee?.x ?? 0)),
+      Math.abs(x - (holeData.pin?.x ?? 0)),
+    );
+    const corridorZ = Math.max(
+      Math.abs(z - (holeData.tee?.z ?? 0)),
+      Math.abs(z - (holeData.pin?.z ?? 0)),
+    );
+    if (corridorX > 120 || corridorZ > 80) return 'oob';
+    return 'rough';
+  }
+  return 'fairway';
+}
+
+function shapeContains(r, x, z) {
+  switch (r.shape) {
+    case 'rect': {
+      return Math.abs(x - r.x) <= (r.w ?? 0) / 2 &&
+             Math.abs(z - r.z) <= (r.d ?? 0) / 2;
+    }
+    case 'circle': {
+      const dx = x - r.x, dz = z - r.z;
+      return dx * dx + dz * dz <= (r.r ?? 0) ** 2;
+    }
+    case 'ring': {
+      const dx = x - r.x, dz = z - r.z;
+      const d2 = dx * dx + dz * dz;
+      return d2 <= (r.r2 ?? 0) ** 2 && d2 >= (r.r ?? 0) ** 2;
+    }
+    case 'spline': {
+      // Distance to polyline with per-segment width
+      const pts = r.points || [];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1];
+        const dx = b.x - a.x, dz = b.z - a.z;
+        const len2 = dx * dx + dz * dz;
+        if (len2 < 1e-6) continue;
+        const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / len2));
+        const px = a.x + dx * t, pz = a.z + dz * t;
+        const ex = x - px, ez = z - pz;
+        const w = (a.w + (b.w - a.w) * t) / 2;
+        if (ex * ex + ez * ez <= w * w) return true;
+      }
+      return false;
+    }
+    case 'fill':
+      return false;
+    default:
+      return false;
+  }
+}

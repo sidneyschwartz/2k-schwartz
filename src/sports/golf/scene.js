@@ -1,56 +1,52 @@
-// Three.js scene + camera follow helper. No HDRI; sky-gradient via fog + clear color.
-// followBall(ballMesh, targetMesh) smooths a 3rd-person chase camera behind the ball
-// looking toward the pin.
+// Three.js scene + camera follow helper. The sky / lighting / post-FX are layered
+// on top by visuals.js — this file only owns the renderer, scene root, camera, and
+// the 3rd-person chase logic.
+//
+// followBall(ballMesh, targetMesh, dt, opts) smooths a chase camera behind the ball
+// looking toward the pin. resetCameraFor(ballPos, lookAtPos) snaps the smoothed
+// state so the camera doesn't jump after a flyover or hole change.
 
 import * as THREE from 'three';
+
+const AIM_CLAMP = Math.PI * 0.5; // ±90° max — prevents spinning behind the player
 
 export function createScene(host) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.BasicShadowMap;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMappingExposure = 1.0;
 
   const canvas = renderer.domElement;
   canvas.classList.add('golf-canvas');
   host.appendChild(canvas);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x9ad0ff);
-  scene.fog = new THREE.Fog(0x9ad0ff, 220, 520);
+  // Background + fog + sun are owned by visuals.js; scene.js just provides safe defaults
+  // so the scene isn't pure black if visuals.js fails to load.
+  scene.background = new THREE.Color(0x87b6e0);
 
   const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 1500);
   camera.position.set(0, 4, -8);
   camera.lookAt(0, 0, 30);
 
-  // Sun
-  const sun = new THREE.DirectionalLight(0xfff2d6, 1.05);
-  sun.position.set(60, 120, 40);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);
-  sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 400;
-  const s = 80;
-  sun.shadow.camera.left = -s;
-  sun.shadow.camera.right = s;
-  sun.shadow.camera.top = s;
-  sun.shadow.camera.bottom = -s;
-  scene.add(sun);
-
-  const ambient = new THREE.HemisphereLight(0xbcdcff, 0x2d4d2d, 0.55);
-  scene.add(ambient);
-
-  function resize() {
+  // Resize hook — visuals.js layers a composer on top and pushes its own setSize
+  // into this list so EffectComposer / Bloom / SMAA all keep in sync.
+  const resizeHooks = [];
+  function onResize() {
     const w = window.innerWidth;
     const h = window.innerHeight;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    for (const cb of resizeHooks) {
+      try { cb(w, h); } catch {}
+    }
   }
-  resize();
-  window.addEventListener('resize', resize);
+  onResize();
+  window.addEventListener('resize', onResize);
 
   // Camera follow state
   const camState = {
@@ -64,7 +60,11 @@ export function createScene(host) {
   };
 
   function followBall(ballMesh, targetMesh, dt = 1 / 60, opts = {}) {
-    const aimYaw = opts.aimYaw ?? 0;
+    let aimYaw = opts.aimYaw ?? 0;
+    // Hard clamp aim so RMB-drag can't spin the camera past the player.
+    if (aimYaw > AIM_CLAMP) aimYaw = AIM_CLAMP;
+    if (aimYaw < -AIM_CLAMP) aimYaw = -AIM_CLAMP;
+
     const inFlight = opts.inFlight ?? false;
     const target = targetMesh.position;
     const ball = ballMesh.position;
@@ -101,11 +101,47 @@ export function createScene(host) {
     camera.lookAt(camState.smoothedLook);
   }
 
+  // Snap-init the chase camera state for a fresh hole or after a flyover so the
+  // camera doesn't have to lerp from wherever it was on the previous hole. Pass
+  // the upcoming ball position + the point you want the camera initially aimed at
+  // (usually the pin). The next followBall() call will lerp from this clean base.
+  function resetCameraFor(ballPos, lookAtPos) {
+    const dx = lookAtPos.x - ballPos.x;
+    const dz = lookAtPos.z - ballPos.z;
+    const yaw = Math.atan2(dx, dz);
+    const dist = camState.distance;
+    const height = camState.height;
+    camState.smoothed.set(
+      ballPos.x - Math.sin(yaw) * dist,
+      ballPos.y + height,
+      ballPos.z - Math.cos(yaw) * dist,
+    );
+    camState.smoothedLook.set(
+      ballPos.x + Math.sin(yaw) * 4,
+      ballPos.y + 0.4,
+      ballPos.z + Math.cos(yaw) * 4,
+    );
+    camera.position.copy(camState.smoothed);
+    camera.lookAt(camState.smoothedLook);
+  }
+
+  function addResizeHook(cb) { resizeHooks.push(cb); }
+  function removeResizeHook(cb) {
+    const i = resizeHooks.indexOf(cb);
+    if (i >= 0) resizeHooks.splice(i, 1);
+  }
+
   function dispose() {
-    window.removeEventListener('resize', resize);
+    window.removeEventListener('resize', onResize);
+    resizeHooks.length = 0;
     renderer.dispose();
     if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
   }
 
-  return { scene, camera, renderer, sun, followBall, dispose, camState };
+  return {
+    scene, camera, renderer,
+    followBall, resetCameraFor,
+    addResizeHook, removeResizeHook,
+    dispose, camState,
+  };
 }
