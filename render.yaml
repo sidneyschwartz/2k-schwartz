@@ -1,0 +1,21 @@
+# Render Blueprint for 2K Schwartz.
+# Single web service that serves the built client AND the WebSocket endpoint.
+# To deploy: connect this repo to Render, hit "Apply blueprint".
+
+services:
+  - type: web
+    name: 2k-schwartz
+    runtime: node
+    plan: free
+    region: oregon
+    autoDeploy: true
+    branch: main
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PORT
+        generateValue: false
+        value: "10000"
+    healthCheckPath: /
