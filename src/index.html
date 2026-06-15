@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>2K Schwartz</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app">
+    <section id="menu" class="screen">
+      <h1>2K Schwartz</h1>
+      <p class="tag">Pick a sport.</p>
+      <div class="sports">
+        <button class="sport" data-sport="golf">Golf</button>
+        <button class="sport" data-sport="tennis">Tennis</button>
+        <button class="sport disabled" disabled>Bowling (soon)</button>
+        <button class="sport disabled" disabled>Boxing (soon)</button>
+      </div>
+    </section>
+
+    <section id="sport-host" class="screen hidden"></section>
+  </div>
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

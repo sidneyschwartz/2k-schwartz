@@ -1,15 +1,23 @@
 {
   "name": "2k-schwartz",
-  "version": "0.1.0",
-  "description": "Schwartz brothers' Wii Sports-style multiplayer game",
+  "version": "0.2.0",
+  "description": "Schwartz brothers' multi-sport game (golf MVP)",
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "concurrently -k -n vite,server -c blue,green \"vite\" \"node --watch server/index.js\"",
+    "build": "vite build",
     "start": "node server/index.js",
-    "dev": "node --watch server/index.js"
+    "preview": "vite preview"
   },
   "dependencies": {
+    "cannon-es": "^0.20.0",
+    "three": "^0.170.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "vite": "^6.0.0"
   },
   "engines": {
     "node": ">=20"

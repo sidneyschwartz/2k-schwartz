@@ -3,6 +3,8 @@
   --fg: #e7ecff;
   --accent: #6cf;
   --muted: #7a85a8;
+  --green-1: #1e6e3a;
+  --green-2: #3aa55a;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -13,8 +15,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
 }
-#app { width: min(900px, 96vw); }
+#app { width: min(1100px, 98vw); }
 .screen { text-align: center; padding: 2rem 1rem; }
 .hidden { display: none; }
 h1 { font-size: 3rem; margin: 0 0 0.5rem; letter-spacing: 0.04em; }
@@ -32,29 +35,40 @@ h1 { font-size: 3rem; margin: 0 0 0.5rem; letter-spacing: 0.04em; }
   transition: transform 0.1s, background 0.15s;
 }
 .sport:hover:not(.disabled) { background: #21306b; transform: translateY(-2px); }
+.sport[data-sport="golf"] {
+  background: linear-gradient(135deg, var(--green-1), var(--green-2));
+  border-color: #2a8d4a;
+}
+.sport[data-sport="golf"]:hover { filter: brightness(1.1); transform: translateY(-2px); }
 .sport.disabled { opacity: 0.4; cursor: not-allowed; }
 
 .lobby-row { display: flex; gap: 0.5rem; justify-content: center; margin: 1rem 0; }
-#room-code {
+.code-input {
   background: #182040; color: var(--fg); border: 1px solid #2a3568;
   padding: 0.75rem 1rem; font-size: 1.2rem; letter-spacing: 0.2em;
   text-transform: uppercase; text-align: center; border-radius: 8px;
   width: 180px;
 }
-#join, .back {
+.btn {
   background: var(--accent); color: #001; border: 0;
   padding: 0.75rem 1.25rem; font-weight: 600; border-radius: 8px; cursor: pointer;
 }
-.back { background: transparent; color: var(--muted); margin-top: 1rem; }
+.btn.ghost { background: transparent; color: var(--muted); }
+.back { background: transparent; color: var(--muted); margin-top: 1rem; border: 0; cursor: pointer; }
 .status { color: var(--muted); min-height: 1.5em; }
 
 .hud {
   display: flex; justify-content: space-between;
   font-variant-numeric: tabular-nums; font-size: 1.25rem; margin-bottom: 0.5rem;
 }
-#canvas {
+canvas { display: block; }
+.tennis-canvas {
   width: 100%; height: auto; aspect-ratio: 800 / 480;
   background: #050816; border: 1px solid #2a3568; border-radius: 8px;
-  display: block;
+}
+.golf-canvas {
+  width: 100vw; height: 100vh;
+  position: fixed; inset: 0;
+  z-index: 0;
 }
 .hint { color: var(--muted); font-size: 0.9rem; }
