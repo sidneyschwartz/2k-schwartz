@@ -203,7 +203,9 @@ function buildClub() {
 
 function buildGolfer(preset) {
   const H = preset.height;
-  const headSize = H / 7.5;                  // 7.5-head proportions for slightly stylized look
+  // Slightly larger head than strict realism (6.5 heads tall) — reads better at
+  // the 4-7m game camera distance and matches the stylized look of 2K/Wii Golf.
+  const headSize = H / 6.5;
   const torsoLen = H * 0.30;
   const hipsY = H * 0.50;                    // hip joint height
   const shoulderY = hipsY + torsoLen;        // shoulder joint height
