@@ -15,6 +15,9 @@ import { clubs } from './clubs.js';
 import { connectGolf } from './net.js';
 import { DEMO_HOLES, getHole } from './course/holes.js';
 import { buildHole } from './course/terrain.js';
+import { createAiGolfer, AI_PERSONAS } from './ai.js';
+import { createAudio, clubHitName } from './audio.js';
+import { divotSpray, ballTrail, splashEffect } from './vfx.js';
 
 const HOLE_RADIUS = 0.108;        // real golf hole radius (m)
 
@@ -51,8 +54,9 @@ export function mountGolf(host, configOrOnExit) {
   let _cfg = {};
   if (typeof configOrOnExit === 'function') _cfg = { onExit: configOrOnExit };
   else if (configOrOnExit && typeof configOrOnExit === 'object') _cfg = configOrOnExit;
-  const { mode = 'single', code = null, character = null, onExit } = _cfg;
+  const { mode = 'single', code = null, character = null, cpu = null, onExit } = _cfg;
   const isMultiplayer = mode === 'host' || mode === 'join';
+  const hasCpu = mode === 'single' && !!cpu;
 
   host.innerHTML = '';
   host.style.position = 'relative';
@@ -108,10 +112,23 @@ export function mountGolf(host, configOrOnExit) {
     holeData: DEMO_HOLES[0],
     holeCount: DEMO_HOLES.length,
     holes: DEMO_HOLES.map((h) => ({ par: h.par, length: h.yardage })),
+    // CPU state (single-player vs CPU): alternating-hole format. Player plays the
+    // hole, then the CPU plays the same hole, then we advance both.
+    cpuPhase: hasCpu ? 'player' : null, // 'player' | 'cpu' | 'done'
+    aiName: hasCpu ? (AI_PERSONAS[cpu.personaId]?.name ?? 'CPU') : null,
+    aiDifficulty: hasCpu ? cpu.difficulty : null,
     scorecard: isMultiplayer ? {
       players: [
         { name: character?.name || 'You', scores: [] },
         { name: 'Opponent', scores: [] },
+      ],
+      par: DEMO_HOLES.map((h) => h.par),
+      holeCount: DEMO_HOLES.length,
+      currentHole: 1,
+    } : hasCpu ? {
+      players: [
+        { name: character?.name || 'You', scores: [] },
+        { name: AI_PERSONAS[cpu.personaId]?.name ?? 'CPU', scores: [] },
       ],
       par: DEMO_HOLES.map((h) => h.par),
       holeCount: DEMO_HOLES.length,
@@ -123,6 +140,13 @@ export function mountGolf(host, configOrOnExit) {
       currentHole: 1,
     },
   };
+
+  const ai = hasCpu ? createAiGolfer({
+    difficulty: cpu.difficulty,
+    personaId: cpu.personaId,
+    clubList: clubs,
+    holeData: game.holeData,
+  }) : null;
 
   function loadHole(holeNumber) {
     const data = getHole(holeNumber);
@@ -158,9 +182,15 @@ export function mountGolf(host, configOrOnExit) {
   loadHole(1);
   loadApplyMaterial().then((fn) => { applyMaterial = fn; });
 
+  // ---- Audio + VFX ----
+  const audio = createAudio();
+  host._audio = audio; // settings menu (ui-ux-mp) can wire a mute toggle here
+  const trail = ballTrail(scene, ballMesh);
+  let splashed = false; // dedupe splash per shot
+
   // ---- Swing controller ----
   const swing = createSwingController({
-    onSwingStart: () => { /* could play SFX */ },
+    onSwingStart: () => { audio.play('click_meter'); },
     onShot: (shot) => launchShot(shot),
   });
   swing.attach(window);
@@ -168,9 +198,28 @@ export function mountGolf(host, configOrOnExit) {
   function launchShot({ club, power, accuracyError, aimYaw, stance }) {
     if (game.complete) return;
     if (isMultiplayer && !game.localActive) return;
+    if (hasCpu && game.cpuPhase !== 'player') return; // ignore human swings during CPU's turn
     game.strokes += 1;
     game.inFlight = true;
     game.flightStart = performance.now();
+
+    // Audio + VFX on impact.
+    audio.play(clubHitName(club.name));
+    const bp0 = physics.ball.position;
+    divotSpray(scene, { x: bp0.x, y: bp0.y, z: bp0.z });
+    splashed = false;
+    trail.start();
+
+    // Snapshot for replay: ball start state + the shot params. The ring buffer is
+    // separately captured each frame in the rAF tick; this snapshot is the rewind point.
+    const ballPos = physics.ball.position;
+    replay.start = {
+      pos: [ballPos.x, ballPos.y, ballPos.z],
+      hole: game.hole,
+      shooter: hasCpu && game.cpuPhase === 'cpu' ? 'cpu' : 'player',
+    };
+    replay.frames.length = 0;
+    replay.available = true;
 
     if (isMultiplayer && net) {
       const ball = physics.ball.position;
@@ -215,7 +264,72 @@ export function mountGolf(host, configOrOnExit) {
     );
 
     swing.reset();
+    replay.shotStart = performance.now();
   }
+
+  // ---- Replay (ring buffer over the last shot's flight) ----
+  const REPLAY_MAX_SECONDS = 6;
+  const replay = {
+    frames: [],
+    start: null,
+    available: false,
+    playing: false,
+    cursor: 0,
+    playStart: 0,
+    shotStart: 0,
+  };
+  function captureReplayFrame() {
+    if (!replay.start || replay.playing || !game.inFlight) return;
+    const t = performance.now() - replay.shotStart;
+    if (t > REPLAY_MAX_SECONDS * 1000) return;
+    if (replay.frames.length && t - replay.frames[replay.frames.length - 1].t < 8) return;
+    const p = physics.ball.position;
+    const q = physics.ball.quaternion;
+    replay.frames.push({
+      t, x: p.x, y: p.y, z: p.z,
+      qx: q.x, qy: q.y, qz: q.z, qw: q.w,
+    });
+  }
+  function replayLastShot() {
+    if (!replay.available || replay.playing) return false;
+    if (!replay.frames.length || !replay.start) return false;
+    replay.playing = true;
+    replay.cursor = 0;
+    replay.playStart = performance.now();
+    physics.ball.velocity.set(0, 0, 0);
+    physics.ball.angularVelocity.set(0, 0, 0);
+    physics.ball.sleep();
+    return true;
+  }
+  function advanceReplay(now) {
+    if (!replay.playing) return;
+    const elapsed = (now - replay.playStart) * 0.6;
+    while (replay.cursor < replay.frames.length - 1 &&
+           replay.frames[replay.cursor + 1].t <= elapsed) {
+      replay.cursor += 1;
+    }
+    const f = replay.frames[replay.cursor];
+    if (!f) { endReplay(); return; }
+    physics.ball.position.set(f.x, f.y, f.z);
+    physics.ball.quaternion.set(f.qx, f.qy, f.qz, f.qw);
+    const lastT = replay.frames[replay.frames.length - 1].t;
+    if (elapsed > lastT + 300) endReplay();
+  }
+  function endReplay() {
+    replay.playing = false;
+    const last = replay.frames[replay.frames.length - 1];
+    if (last) {
+      physics.ball.velocity.set(0, 0, 0);
+      physics.ball.angularVelocity.set(0, 0, 0);
+      physics.ball.position.set(last.x, last.y, last.z);
+      physics.ball.quaternion.set(last.qx, last.qy, last.qz, last.qw);
+      physics.ball.wakeUp();
+    }
+  }
+  function onReplayKey(e) {
+    if (e.code === 'KeyR' && !e.repeat) replayLastShot();
+  }
+  window.addEventListener('keydown', onReplayKey);
 
   // ---- HUD ----
   let unmountHud = null;
@@ -471,17 +585,42 @@ export function mountGolf(host, configOrOnExit) {
     // Settle / in-flight detection
     if (game.inFlight) {
       const speed = physics.ball.velocity.length();
+      // Rolling-ball SFX gain follows ground speed (only while near the ground).
+      const onGround = bp.y < physics.BALL_RADIUS * 3;
+      audio.play('ball_roll', { speed: onGround ? speed : 0 });
+
+      // Water splash: detect ball entering a water region.
+      if (!splashed && game.holeData?.regions) {
+        for (const r of game.holeData.regions) {
+          if (r.type !== 'water') continue;
+          const inX = Math.abs(bp.x - r.x) <= (r.w ?? 0) / 2;
+          const inZ = Math.abs(bp.z - r.z) <= (r.d ?? 0) / 2;
+          if (inX && inZ && bp.y < 0.5) {
+            audio.play('ball_splash');
+            splashEffect(scene, { x: bp.x, y: 0.05, z: bp.z });
+            splashed = true;
+            break;
+          }
+        }
+      }
+
       if (speed < 0.15 && bp.y < physics.BALL_RADIUS * 2.5) {
         game.settleTimer += dt;
         if (game.settleTimer > 0.6) {
           game.inFlight = false;
           game.settleTimer = 0;
+          audio.play('ball_roll', { speed: 0 });
+          trail.stop();
           onBallSettled(bp);
         }
       } else {
         game.settleTimer = 0;
       }
     }
+
+    // Trail update + ambient wind.
+    trail.update(dt);
+    audio.tickAmbient(dt);
 
     // Cup sensor: when ball center is within HOLE_RADIUS * 1.5 in XZ of the pin AND
     // its vertical speed is below 2 m/s, count it as holed and snap-stop. This catches
@@ -500,6 +639,9 @@ export function mountGolf(host, configOrOnExit) {
         physics.ball.position.set(pinWorld.x, pinWorld.y - 0.1, pinWorld.z);
         game.complete = true;
         game.inFlight = false;
+        audio.play('ball_roll', { speed: 0 });
+        audio.play('ball_in_hole');
+        trail.stop();
         onHoleComplete();
         completeBanner.innerHTML = `Hole ${game.hole} <small style="opacity:0.7">${game.holeName || ''}</small><br/>complete in ${game.strokes} stroke${game.strokes === 1 ? '' : 's'}`;
         completeBanner.style.display = 'block';
@@ -546,6 +688,9 @@ export function mountGolf(host, configOrOnExit) {
     try { activeTerrain?.dispose(); } catch {}
     try { physics.dispose(); } catch {}
     try { disposeScene(); } catch {}
+    try { trail.dispose(); } catch {}
+    try { audio.setMuted(true); } catch {}
+    delete host._audio;
     host.innerHTML = '';
   };
 }
