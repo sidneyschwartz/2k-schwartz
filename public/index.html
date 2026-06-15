@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>2K Schwartz</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app">
+    <section id="menu" class="screen">
+      <h1>2K Schwartz</h1>
+      <p class="tag">Pick a sport. Share the room code. Play.</p>
+      <div class="sports">
+        <button class="sport" data-sport="tennis">Tennis</button>
+        <button class="sport disabled" disabled>Bowling (soon)</button>
+        <button class="sport disabled" disabled>Baseball (soon)</button>
+        <button class="sport disabled" disabled>Boxing (soon)</button>
+      </div>
+    </section>
+
+    <section id="lobby" class="screen hidden">
+      <h2>Tennis</h2>
+      <div class="lobby-row">
+        <input id="room-code" maxlength="6" placeholder="ROOM CODE" autocomplete="off" />
+        <button id="join">Join / Create</button>
+      </div>
+      <p id="lobby-status" class="status"></p>
+      <button class="back" data-back>← back</button>
+    </section>
+
+    <section id="game" class="screen hidden">
+      <div class="hud">
+        <span id="score">0 — 0</span>
+        <span id="room-label"></span>
+      </div>
+      <canvas id="canvas" width="800" height="480"></canvas>
+      <p class="hint">Move your paddle with mouse or W/S keys.</p>
+      <button class="back" data-back>← leave</button>
+    </section>
+  </div>
+  <script type="module" src="/game.js"></script>
+</body>
+</html>

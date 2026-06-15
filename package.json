@@ -1,0 +1,17 @@
+{
+  "name": "2k-schwartz",
+  "version": "0.1.0",
+  "description": "Schwartz brothers' Wii Sports-style multiplayer game",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
