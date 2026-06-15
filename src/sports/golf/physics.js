@@ -43,8 +43,10 @@ export function createPhysics() {
   ball.sleepTimeLimit = 0.8;
   world.addBody(ball);
 
-  // Default infinite ground plane (fairway) — gameplay code can swap it with a real mesh
-  const groundBody = new CANNON.Body({ mass: 0, material: fairwayMat });
+  // Default infinite ground plane (rough) at y=0. Per-hole terrain stacks slight Y offsets
+  // on top (greens > fairway > rough) so the ball rolls on the correct surface. This plane
+  // is also the catch-all for shots that fly off the course.
+  const groundBody = new CANNON.Body({ mass: 0, material: roughMat });
   groundBody.addShape(new CANNON.Plane());
   groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
   world.addBody(groundBody);
@@ -87,26 +89,43 @@ export function createPhysics() {
     return body;
   }
 
+  // Wind state (set per hole). dir is radians in XZ plane; 0 = +Z (with player toward pin).
+  // Drag is computed against (v - wind), which naturally produces head/tail/cross effects.
+  const wind = { vec: new CANNON.Vec3(0, 0, 0), speed: 0 };
+  function setWind({ speed = 0, dir = 0 } = {}) {
+    wind.speed = speed;
+    wind.vec.set(Math.sin(dir) * speed, 0, Math.cos(dir) * speed);
+  }
+
   // Per-step aerodynamics on the ball.
   const _drag = new CANNON.Vec3();
+  const _vRel = new CANNON.Vec3();
   const _magnus = new CANNON.Vec3();
   function applyAerodynamics() {
     if (ball.sleepState === CANNON.Body.SLEEPING) return;
     const v = ball.velocity;
-    const speed = v.length();
-    if (speed < 0.05) return;
-    // Drag: F = -0.5 * rho * Cd * A * |v| * v
-    const k = 0.5 * AIR_DENSITY * Cd * FRONTAL_AREA * speed;
-    _drag.set(-v.x * k, -v.y * k, -v.z * k);
+    // Only apply wind to the ball while it's in flight (above the ground a bit) so
+    // a putt isn't pushed sideways by a 6 m/s breeze.
+    const inFlight = ball.position.y > BALL_RADIUS * 3 && v.length() > 0.5;
+    if (inFlight) {
+      _vRel.set(v.x - wind.vec.x, v.y - wind.vec.y, v.z - wind.vec.z);
+    } else {
+      _vRel.set(v.x, v.y, v.z);
+    }
+    const relSpeed = _vRel.length();
+    if (relSpeed < 0.05) return;
+    // Drag: F = -0.5 * rho * Cd * A * |vRel| * vRel
+    const k = 0.5 * AIR_DENSITY * Cd * FRONTAL_AREA * relSpeed;
+    _drag.set(-_vRel.x * k, -_vRel.y * k, -_vRel.z * k);
     ball.applyForce(_drag, ball.position);
-    // Magnus: F = k * (omega x v)
+    // Magnus: F = k * (omega x vRel)
     const w = ball.angularVelocity;
     _magnus.set(
-      w.y * v.z - w.z * v.y,
-      w.z * v.x - w.x * v.z,
-      w.x * v.y - w.y * v.x,
+      w.y * _vRel.z - w.z * _vRel.y,
+      w.z * _vRel.x - w.x * _vRel.z,
+      w.x * _vRel.y - w.y * _vRel.x,
     );
-    _magnus.scale(MAGNUS_K * speed, _magnus);
+    _magnus.scale(MAGNUS_K * relSpeed, _magnus);
     ball.applyForce(_magnus, ball.position);
   }
 
@@ -129,10 +148,17 @@ export function createPhysics() {
     while (world.bodies.length) world.removeBody(world.bodies[0]);
   }
 
+  function removeStaticBodies() {
+    for (const b of staticBodies) world.removeBody(b);
+    staticBodies.length = 0;
+  }
+
   return {
     world,
     ball,
     addStaticMesh,
+    removeStaticBodies,
+    setWind,
     step,
     dispose,
     BALL_RADIUS,

@@ -13,11 +13,36 @@ import { createPhysics } from './physics.js';
 import { createSwingController } from './swing.js';
 import { clubs } from './clubs.js';
 import { connectGolf } from './net.js';
+import { DEMO_HOLES, getHole } from './course/holes.js';
+import { buildHole } from './course/terrain.js';
 
-const HOLE_LENGTH = 150;          // m from tee to pin (par 3)
 const HOLE_RADIUS = 0.108;        // real golf hole radius (m)
-const PIN_POS = new THREE.Vector3(0, 0, HOLE_LENGTH);
-const TEE_POS = new THREE.Vector3(0, 0, 0);
+
+// Try to resolve the art-agent material factories if present. We pass an applyMaterial
+// callback to buildHole so terrain.js can attach textured materials per surface — and
+// silently fall back to flat colors if materials.js isn't merged yet.
+async function loadApplyMaterial() {
+  try {
+    const mod = await import('./materials.js');
+    const factories = {
+      fairway: mod.fairwayMaterial,
+      rough: mod.roughMaterial,
+      green: mod.greenMaterial,
+      tee: mod.fairwayMaterial,      // tee box uses fairway texture
+      sand: mod.sandMaterial,
+      water: mod.waterMaterial,
+    };
+    return (surface, mesh) => {
+      const f = factories[surface];
+      if (!f) return null;
+      const m = f();
+      mesh.material = m;
+      return m;
+    };
+  } catch {
+    return null;
+  }
+}
 
 // Accepts either:
 //   mountGolf(host, onExitFn)                       — legacy single-player
@@ -35,71 +60,16 @@ export function mountGolf(host, configOrOnExit) {
   // ---- Scene ----
   const { scene, camera, renderer, followBall, dispose: disposeScene } = createScene(host);
 
-  // Ground (fairway)
-  const fairwayGeo = new THREE.PlaneGeometry(120, 260, 1, 1);
-  const fairwayMat = new THREE.MeshStandardMaterial({ color: 0x4ea24a, roughness: 0.95 });
-  const fairway = new THREE.Mesh(fairwayGeo, fairwayMat);
-  fairway.rotation.x = -Math.PI / 2;
-  fairway.position.z = HOLE_LENGTH / 2;
-  fairway.receiveShadow = true;
-  scene.add(fairway);
+  // ---- Physics ----
+  const physics = createPhysics();
 
-  // Surrounding rough (a larger darker plane, behind fairway)
-  const roughGeo = new THREE.PlaneGeometry(600, 600);
-  const roughMat = new THREE.MeshStandardMaterial({ color: 0x2c6a30, roughness: 1.0 });
-  const rough = new THREE.Mesh(roughGeo, roughMat);
-  rough.rotation.x = -Math.PI / 2;
-  rough.position.y = -0.01;
-  rough.receiveShadow = true;
-  scene.add(rough);
-
-  // Tee box
-  const teeBoxGeo = new THREE.BoxGeometry(4, 0.02, 3);
-  const teeBoxMat = new THREE.MeshStandardMaterial({ color: 0x6fbf6c });
-  const teeBox = new THREE.Mesh(teeBoxGeo, teeBoxMat);
-  teeBox.position.set(0, 0.011, 0);
-  teeBox.receiveShadow = true;
-  scene.add(teeBox);
-
-  // Green
-  const greenGeo = new THREE.CircleGeometry(10, 36);
-  const greenMat = new THREE.MeshStandardMaterial({ color: 0x7ed070, roughness: 0.9 });
-  const green = new THREE.Mesh(greenGeo, greenMat);
-  green.rotation.x = -Math.PI / 2;
-  green.position.set(PIN_POS.x, 0.012, PIN_POS.z);
-  green.receiveShadow = true;
-  scene.add(green);
-
-  // Hole (dark circle on green)
-  const holeGeo = new THREE.CircleGeometry(HOLE_RADIUS, 24);
-  const holeMat = new THREE.MeshBasicMaterial({ color: 0x080808 });
-  const hole = new THREE.Mesh(holeGeo, holeMat);
-  hole.rotation.x = -Math.PI / 2;
-  hole.position.set(PIN_POS.x, 0.014, PIN_POS.z);
-  scene.add(hole);
-
-  // Pin: cylinder + flag triangle
-  const pinGroup = new THREE.Group();
-  const poleGeo = new THREE.CylinderGeometry(0.015, 0.015, 2.2, 8);
-  const poleMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
-  const pole = new THREE.Mesh(poleGeo, poleMat);
-  pole.position.y = 1.1;
-  pole.castShadow = true;
-  pinGroup.add(pole);
-
-  const flagShape = new THREE.BufferGeometry();
-  flagShape.setAttribute('position', new THREE.Float32BufferAttribute([
-    0, 2.1, 0,
-    0.6, 1.9, 0,
-    0, 1.7, 0,
-  ], 3));
-  flagShape.setIndex([0, 1, 2]);
-  flagShape.computeVertexNormals();
-  const flagMat = new THREE.MeshStandardMaterial({ color: 0xd23030, side: THREE.DoubleSide });
-  const flag = new THREE.Mesh(flagShape, flagMat);
-  pinGroup.add(flag);
-  pinGroup.position.copy(PIN_POS);
-  scene.add(pinGroup);
+  // Ball mesh synced from physics
+  const ballMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(physics.BALL_RADIUS, 24, 16),
+    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 }),
+  );
+  ballMesh.castShadow = true;
+  scene.add(ballMesh);
 
   // Aim arrow (visual line from ball toward pin direction adjusted by aim)
   const aimGeo = new THREE.BufferGeometry();
@@ -110,36 +80,22 @@ export function mountGolf(host, configOrOnExit) {
   );
   scene.add(aimLine);
 
-  // ---- Physics ----
-  const physics = createPhysics();
-  // Ball mesh synced from physics
-  const ballMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(physics.BALL_RADIUS, 24, 16),
-    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 }),
-  );
-  ballMesh.castShadow = true;
-  scene.add(ballMesh);
-
-  // Pin sensor target (used for camera follow)
+  // Pin sensor target (used for camera follow). Re-positioned per hole.
   const pinTarget = new THREE.Object3D();
-  pinTarget.position.copy(PIN_POS);
   scene.add(pinTarget);
 
-  function placeBallOnTee() {
-    physics.ball.velocity.set(0, 0, 0);
-    physics.ball.angularVelocity.set(0, 0, 0);
-    physics.ball.position.set(TEE_POS.x, physics.BALL_RADIUS + 0.025, TEE_POS.z);
-    physics.ball.quaternion.set(0, 0, 0, 1);
-    physics.ball.wakeUp();
-  }
-  placeBallOnTee();
+  // Current hole state (terrain instance is rebuilt on each hole change).
+  let activeTerrain = null;
+  let teeWorld = new THREE.Vector3();
+  let pinWorld = new THREE.Vector3();
+  let applyMaterial = null;
 
   // ---- Game state ----
   const game = {
     strokes: 0,
     complete: false,
     inFlight: false,
-    wind: { speed: 0, dirDeg: 0 }, // wind not applied yet — placeholder so HUD compiles
+    wind: { speed: 0, dir: 0, dirDeg: 0 },
     flightStart: 0,
     settleTimer: 0,
     // multiplayer
@@ -147,23 +103,60 @@ export function mountGolf(host, configOrOnExit) {
     activeSlot: 0,
     localActive: !isMultiplayer,
     hole: 1,
-    par: 3,
-    holeCount: isMultiplayer ? 3 : 1,
-    holes: [
-      { par: 3, length: HOLE_LENGTH },
-      { par: 4, length: 250 },
-      { par: 5, length: 320 },
-    ],
+    par: DEMO_HOLES[0].par,
+    holeName: DEMO_HOLES[0].name,
+    holeData: DEMO_HOLES[0],
+    holeCount: DEMO_HOLES.length,
+    holes: DEMO_HOLES.map((h) => ({ par: h.par, length: h.yardage })),
     scorecard: isMultiplayer ? {
       players: [
         { name: character?.name || 'You', scores: [] },
         { name: 'Opponent', scores: [] },
       ],
-      par: [3, 4, 5],
-      holeCount: 3,
+      par: DEMO_HOLES.map((h) => h.par),
+      holeCount: DEMO_HOLES.length,
       currentHole: 1,
-    } : null,
+    } : {
+      players: [{ name: character?.name || 'You', scores: [] }],
+      par: DEMO_HOLES.map((h) => h.par),
+      holeCount: DEMO_HOLES.length,
+      currentHole: 1,
+    },
   };
+
+  function loadHole(holeNumber) {
+    const data = getHole(holeNumber);
+    if (activeTerrain) { try { activeTerrain.dispose(); } catch {} activeTerrain = null; }
+    activeTerrain = buildHole(scene, physics, data, { applyMaterial });
+    teeWorld.copy(activeTerrain.teeWorld);
+    pinWorld.copy(activeTerrain.pinWorld);
+    pinTarget.position.copy(pinWorld);
+    physics.setWind(data.wind ?? { speed: 0, dir: 0 });
+    game.wind = {
+      speed: data.wind?.speed ?? 0,
+      dir: data.wind?.dir ?? 0,
+      dirDeg: ((data.wind?.dir ?? 0) * 180 / Math.PI),
+    };
+    game.hole = data.number;
+    game.par = data.par;
+    game.holeName = data.name;
+    game.holeData = data;
+    if (game.scorecard) game.scorecard.currentHole = data.number;
+    placeBallOnTee();
+  }
+
+  function placeBallOnTee() {
+    physics.ball.velocity.set(0, 0, 0);
+    physics.ball.angularVelocity.set(0, 0, 0);
+    physics.ball.position.set(teeWorld.x, teeWorld.y + physics.BALL_RADIUS, teeWorld.z);
+    physics.ball.quaternion.set(0, 0, 0, 1);
+    physics.ball.wakeUp();
+  }
+
+  // Load hole 1 immediately (synchronously, using fallback materials). When the
+  // art-agent module finishes loading, we don't rebuild — Phase 2 can hot-swap if needed.
+  loadHole(1);
+  loadApplyMaterial().then((fn) => { applyMaterial = fn; });
 
   // ---- Swing controller ----
   const swing = createSwingController({
@@ -193,8 +186,8 @@ export function mountGolf(host, configOrOnExit) {
     // Compute launch velocity in world space.
     // Direction toward pin from ball, rotated by aimYaw + small stance bias.
     const ball = physics.ball.position;
-    const toPinX = PIN_POS.x - ball.x;
-    const toPinZ = PIN_POS.z - ball.z;
+    const toPinX = pinWorld.x - ball.x;
+    const toPinZ = pinWorld.z - ball.z;
     const baseYaw = Math.atan2(toPinX, toPinZ);
     const yaw = baseYaw + aimYaw + (stance?.x ?? 0) * 0.05;
 
@@ -249,7 +242,12 @@ export function mountGolf(host, configOrOnExit) {
     getStrokes: () => game.strokes,
     getHole: () => game.hole,
     getPar: () => game.par,
-    getHoleInfo: () => ({ par: game.par, number: game.hole, length: HOLE_LENGTH }),
+    getHoleInfo: () => ({
+      par: game.par,
+      number: game.hole,
+      name: game.holeName,
+      length: game.holeData?.yardage ?? 0,
+    }),
     getClubs: () => clubs,                  // legacy alias for fallback HUD
     getScorecard: () => game.scorecard,
     setClub: (name) => swing.setClub(name),
@@ -313,19 +311,33 @@ export function mountGolf(host, configOrOnExit) {
   }
 
   function onHoleComplete() {
-    if (!isMultiplayer || !net) return;
-    // Record locally + tell server. Server emits scorecard update back.
+    // Record locally (multiplayer scorecard updates also come from server).
     if (game.scorecard) {
-      const me = game.scorecard.players[game.mySlot];
+      const slot = isMultiplayer ? game.mySlot : 0;
+      const me = game.scorecard.players[slot];
       if (me) me.scores[game.hole - 1] = game.strokes;
     }
-    net.sendHoleComplete(game.strokes);
-    // Advance hole if there are more left.
+    if (isMultiplayer && net) {
+      net.sendHoleComplete(game.strokes);
+      if (game.hole < game.holeCount) {
+        setTimeout(() => { try { net.nextHole(); } catch {} }, 1500);
+      } else {
+        showHudToast?.('Match complete!');
+      }
+      return;
+    }
+    // Single-player: auto-advance to next hole after a short delay.
     if (game.hole < game.holeCount) {
-      // Brief settle delay so both clients see the "hole complete" banner.
-      setTimeout(() => { try { net.nextHole(); } catch {} }, 1500);
-    } else {
-      showHudToast?.('Match complete!');
+      setTimeout(() => {
+        if (stopped) return;
+        const next = game.hole + 1;
+        game.strokes = 0;
+        game.complete = false;
+        completeBanner.style.display = 'none';
+        resetBtn.style.display = 'none';
+        loadHole(next);
+        swing.reset();
+      }, 1800);
     }
   }
 
@@ -395,12 +407,9 @@ export function mountGolf(host, configOrOnExit) {
         } else if (e.type === 'next-hole') {
           // server: hole index advanced; reset local state for the new hole
           const newHole = (e.hole || 0) + 1;
-          game.hole = newHole;
-          game.par = game.holes[e.hole]?.par ?? 4;
           game.strokes = 0;
           game.complete = false;
-          if (game.scorecard) game.scorecard.currentHole = newHole;
-          placeBallOnTee();
+          loadHole(newHole);   // rebuilds terrain + repositions ball on new tee
           swing.reset();
           completeBanner.style.display = 'none';
           resetBtn.style.display = 'none';
@@ -443,8 +452,8 @@ export function mountGolf(host, configOrOnExit) {
 
     // Aim line — only while idle
     if (swing.state.phase === 'idle' && !game.inFlight && !game.complete) {
-      const toPinX = PIN_POS.x - bp.x;
-      const toPinZ = PIN_POS.z - bp.z;
+      const toPinX = pinWorld.x - bp.x;
+      const toPinZ = pinWorld.z - bp.z;
       const baseYaw = Math.atan2(toPinX, toPinZ);
       const yaw = baseYaw + swing.state.aimYaw;
       const len = 8;
@@ -474,16 +483,25 @@ export function mountGolf(host, configOrOnExit) {
       }
     }
 
-    // Hole detection (XZ distance to pin + ball near ground)
+    // Cup sensor: when ball center is within HOLE_RADIUS * 1.5 in XZ of the pin AND
+    // its vertical speed is below 2 m/s, count it as holed and snap-stop. This catches
+    // both rolling putts and gentle landings near the cup without requiring exact
+    // sphere/sensor body math.
     if (!game.complete) {
-      const dx = bp.x - PIN_POS.x;
-      const dz = bp.z - PIN_POS.z;
+      const dx = bp.x - pinWorld.x;
+      const dz = bp.z - pinWorld.z;
       const distXZ = Math.sqrt(dx * dx + dz * dz);
-      if (distXZ < HOLE_RADIUS * 1.3 && bp.y < physics.BALL_RADIUS * 2) {
+      const vy = Math.abs(physics.ball.velocity.y);
+      const nearGround = bp.y < pinWorld.y + physics.BALL_RADIUS * 6;
+      if (distXZ < HOLE_RADIUS * 1.5 && nearGround && vy < 2) {
+        // Snap to bottom of cup
+        physics.ball.velocity.set(0, 0, 0);
+        physics.ball.angularVelocity.set(0, 0, 0);
+        physics.ball.position.set(pinWorld.x, pinWorld.y - 0.1, pinWorld.z);
         game.complete = true;
         game.inFlight = false;
         onHoleComplete();
-        completeBanner.textContent = `Hole complete in ${game.strokes} stroke${game.strokes === 1 ? '' : 's'}`;
+        completeBanner.innerHTML = `Hole ${game.hole} <small style="opacity:0.7">${game.holeName || ''}</small><br/>complete in ${game.strokes} stroke${game.strokes === 1 ? '' : 's'}`;
         completeBanner.style.display = 'block';
         resetBtn.style.display = 'inline-block';
       }
@@ -525,6 +543,7 @@ export function mountGolf(host, configOrOnExit) {
     swing.detach(window);
     try { unmountHud?.(); } catch {}
     try { net?.close(); } catch {}
+    try { activeTerrain?.dispose(); } catch {}
     try { physics.dispose(); } catch {}
     try { disposeScene(); } catch {}
     host.innerHTML = '';
