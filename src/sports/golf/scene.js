@@ -12,7 +12,9 @@ const AIM_CLAMP = Math.PI * 0.5; // ±90° max — prevents spinning behind the 
 
 export function createScene(host) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // Cap pixel ratio at 1.5 — going to 2x on a 4K laptop costs ~2x fragment work for
+  // marginal visual gain. quality.js can dial this further per preset.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;

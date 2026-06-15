@@ -152,6 +152,40 @@ canvas { display: block; }
 .mode-tile__name { font-weight: 700; font-size: 1.05rem; }
 .mode-tile__sub { color: var(--muted); font-size: 0.85rem; }
 
+.round-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.round-tile {
+  background: linear-gradient(160deg, #1a2249, #131a37);
+  border: 2px solid #2a3568;
+  border-radius: 12px;
+  padding: 1rem 0.75rem;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: center;
+  display: flex; flex-direction: column; gap: 0.2rem; align-items: center;
+  transition: transform 0.12s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.round-tile:hover {
+  transform: translateY(-3px);
+  border-color: #4a5cb8;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+}
+.round-tile--selected {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(255, 210, 74, 0.18), 0 10px 26px rgba(0,0,0,0.4);
+}
+.round-tile__num {
+  font-size: 1.8rem; font-weight: 800; line-height: 1;
+  color: var(--accent-2);
+  font-variant-numeric: tabular-nums;
+}
+.round-tile__name { font-weight: 700; font-size: 0.95rem; }
+.round-tile__sub  { color: var(--muted); font-size: 0.75rem; }
+
 .lobby-step {
   padding: 1rem 0;
 }
@@ -401,6 +435,47 @@ canvas { display: block; }
 @keyframes discon-in {
   from { opacity: 0; transform: translate(-50%, -8px); }
   to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---------------- Multiplayer connection-status indicator ---------------- */
+.golf-connstatus {
+  position: fixed;
+  top: 12px; right: 12px;
+  z-index: 30;
+  background: rgba(8, 14, 30, 0.82);
+  border: 1px solid rgba(180, 200, 255, 0.18);
+  border-radius: 999px;
+  padding: 4px 10px 4px 8px;
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--fg);
+  pointer-events: none;
+  user-select: none;
+}
+.golf-connstatus__dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted);
+  transition: background 0.2s ease;
+}
+.golf-connstatus[data-state="green"] .golf-connstatus__dot {
+  background: var(--good);
+  box-shadow: 0 0 6px var(--good);
+}
+.golf-connstatus[data-state="amber"] .golf-connstatus__dot {
+  background: var(--accent-2);
+  box-shadow: 0 0 6px var(--accent-2);
+  animation: pulse-amber 1.4s ease-out infinite;
+}
+.golf-connstatus[data-state="red"] .golf-connstatus__dot {
+  background: var(--bad);
+  box-shadow: 0 0 6px var(--bad);
+}
+@keyframes pulse-amber {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 210, 74, 0.6); }
+  70%  { box-shadow: 0 0 0 8px rgba(255, 210, 74, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 210, 74, 0); }
 }
 
 /* ---------------- Lie panel + post-shot stats card ---------------- */

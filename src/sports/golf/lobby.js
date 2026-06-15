@@ -1,10 +1,25 @@
-// Golf lobby flow. Asks for mode (single / host / join) and character; produces
-// the config that golf.js needs to boot.
+// Golf lobby flow. Asks for mode (single / host / join / cpu), round length
+// (Front 9 / Back 9 / Full 18 / 3-hole demo), and character; produces the config
+// that golf.js needs to boot.
 //
-// showLobby(host) -> Promise<{ mode: 'single'|'host'|'join', code?: string, character }>
+// showLobby(host) -> Promise<{
+//   mode: 'single'|'cpu'|'host'|'join',
+//   code?: string,
+//   character,
+//   cpu?: { personaId, difficulty },
+//   holeCount: number,
+//   startHole: number          // 1-indexed; 10 for Back 9, 1 otherwise
+// }>
 
 import { showCharacterSelect } from './character-select.js';
 import { listAiPersonas, listDifficulties } from './ai.js';
+
+const ROUND_OPTIONS = [
+  { id: 'demo3', label: 'Quick 3',  desc: 'Three signature holes',    holeCount: 3,  startHole: 1 },
+  { id: 'front9', label: 'Front 9', desc: 'Holes 1–9',                 holeCount: 9,  startHole: 1 },
+  { id: 'back9',  label: 'Back 9',  desc: 'Holes 10–18',               holeCount: 9,  startHole: 10 },
+  { id: 'full18', label: 'Full 18', desc: 'The whole course',          holeCount: 18, startHole: 1 },
+];
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
@@ -57,7 +72,8 @@ export function showLobby(host) {
     let chosenMode = null;
     let chosenCode = null;
     let chosenChar = null;
-    let chosenCpu = null; // { personaId, difficulty } when mode === 'single'
+    let chosenCpu = null; // { personaId, difficulty } when mode === 'cpu'
+    let chosenRound = ROUND_OPTIONS[0]; // default to Quick 3 so existing flows keep working
 
     function exit() {
       screen.remove();
@@ -148,6 +164,42 @@ export function showLobby(host) {
         code: chosenCode || undefined,
         character: chosenChar,
         cpu: chosenMode === 'cpu' ? chosenCpu : undefined,
+        holeCount: chosenRound.holeCount,
+        startHole: chosenRound.startHole,
+      });
+    }
+
+    function goToRoundLength() {
+      body.innerHTML = `
+        <div class="lobby-step lobby-step--round">
+          <h3 class="lobby-step__title">Round length</h3>
+          <p class="lobby-step__hint">Pick how much course you want today.</p>
+          <div class="round-grid">
+            ${ROUND_OPTIONS.map((r) => `
+              <button class="round-tile${r.id === chosenRound.id ? ' round-tile--selected' : ''}" data-round="${r.id}">
+                <div class="round-tile__num">${r.holeCount}</div>
+                <div class="round-tile__name">${r.label}</div>
+                <div class="round-tile__sub">${r.desc}</div>
+              </button>
+            `).join('')}
+          </div>
+          <div class="lobby-step__actions">
+            <button class="btn ghost" data-action="back">&larr; change mode</button>
+            <button class="btn btn--primary" data-action="next">Continue &rarr;</button>
+          </div>
+        </div>
+      `;
+      body.querySelectorAll('.round-tile').forEach((tile) => {
+        tile.addEventListener('click', () => {
+          chosenRound = ROUND_OPTIONS.find((r) => r.id === tile.dataset.round) || ROUND_OPTIONS[0];
+          body.querySelectorAll('.round-tile').forEach((t) => t.classList.toggle('round-tile--selected', t === tile));
+        });
+      });
+      body.querySelector('[data-action="back"]').addEventListener('click', goToModeStep);
+      body.querySelector('[data-action="next"]').addEventListener('click', () => {
+        if (chosenMode === 'host') goToHostCode();
+        else if (chosenMode === 'join') goToJoinCode();
+        else goToCharacter();
       });
     }
 
@@ -246,9 +298,7 @@ export function showLobby(host) {
       body.querySelectorAll('.mode-tile').forEach((tile) => {
         tile.addEventListener('click', () => {
           chosenMode = tile.dataset.mode;
-          if (chosenMode === 'single' || chosenMode === 'cpu') goToCharacter();
-          else if (chosenMode === 'host') goToHostCode();
-          else if (chosenMode === 'join') goToJoinCode();
+          goToRoundLength();
         });
       });
     }

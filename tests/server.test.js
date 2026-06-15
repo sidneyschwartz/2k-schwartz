@@ -116,3 +116,47 @@ test('third client is rejected from a full room', async (t) => {
   assert.match(err.error || '', /full/i);
   a.close(); b.close(); c.close();
 });
+
+test('app-level ping/pong round-trips', async (t) => {
+  const server = await bootServer();
+  t.after(() => server.kill());
+  const c = await openClient();
+  c.send({ type: 'ping', t: 12345 });
+  const pong = await c.waitFor((m) => m.type === 'pong');
+  assert.equal(pong.t, 12345);
+  c.close();
+});
+
+test('reconnect with same clientId reclaims the same slot', async (t) => {
+  const server = await bootServer();
+  t.after(() => server.kill());
+  const code = 'RECON';
+  const cid = 'cid-test-1';
+
+  const a = await openClient();
+  a.send({ type: 'join', sport: 'golf', code, clientId: cid });
+  const aJ = await a.waitFor((m) => m.type === 'joined');
+  assert.equal(aJ.slot, 0);
+
+  const b = await openClient();
+  b.send({ type: 'join', sport: 'golf', code, clientId: 'cid-other' });
+  await b.waitFor((m) => m.type === 'joined');
+
+  // A drops.
+  a.close();
+  await new Promise((r) => setTimeout(r, 100));
+  // B should see opponent-left.
+  await b.waitFor((m) => m.type === 'opponent-left');
+
+  // A reconnects with the same clientId — server should reclaim slot 0.
+  const aPrime = await openClient();
+  aPrime.send({ type: 'join', sport: 'golf', code, clientId: cid });
+  const aPrimeJ = await aPrime.waitFor((m) => m.type === 'joined');
+  assert.equal(aPrimeJ.slot, 0, 'reclaimed slot should be 0');
+  assert.equal(aPrimeJ.reclaimed, true, 'server should mark reclaim');
+
+  // B sees opponent-rejoined (not a fresh 'start').
+  await b.waitFor((m) => m.type === 'opponent-rejoined');
+
+  aPrime.close(); b.close();
+});

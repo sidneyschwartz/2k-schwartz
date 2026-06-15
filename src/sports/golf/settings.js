@@ -13,6 +13,7 @@ const DEFAULTS = {
   cameraDistance: 6.5,
   minimap: true,
   aimLine: true,
+  graphicsQuality: 'high', // 'low' | 'medium' | 'high'; engine clamps cost
 };
 
 export function loadSettings() {
