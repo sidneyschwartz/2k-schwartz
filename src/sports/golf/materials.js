@@ -7,6 +7,7 @@
 
 import * as THREE from 'three';
 import { Reflector } from 'three/examples/jsm/objects/Reflector.js';
+import { Water } from 'three/examples/jsm/objects/Water.js';
 
 const TEX_SIZE = 512;
 
@@ -237,23 +238,91 @@ function getWaterNormalTexture() {
 
 // Engine should call this once per frame to advance ripple animation.
 export function tickWater(dt) {
-  if (!_reflectors.size) return;
+  if (!_reflectors.size && !_waters.size) return;
   _waterClock += dt;
-  // Cheap ripple: just scroll the normal map UV offset.
-  const tex = getWaterNormalTexture();
-  if (tex) {
-    tex.offset.x = (_waterClock * 0.03) % 1;
-    tex.offset.y = (_waterClock * 0.02) % 1;
+  // Cheap ripple for Reflector fallback: scroll the normal map UV offset.
+  if (_reflectors.size) {
+    const tex = getWaterNormalTexture();
+    if (tex) {
+      tex.offset.x = (_waterClock * 0.03) % 1;
+      tex.offset.y = (_waterClock * 0.02) % 1;
+    }
   }
-  for (const r of _reflectors) {
-    if (r.material?.uniforms?.color) {
-      // No-op; Reflector uses a custom shader. Animation is via texture offset.
+  // Real Water class: advance its `time` uniform so the waves animate.
+  for (const w of _waters) {
+    if (w.material?.uniforms?.time) {
+      w.material.uniforms.time.value += dt;
     }
   }
 }
 
-// ---------- reflector water ----------
+// ---------- water ----------
 
+// Generate a smoother waves normal map for the Water shader (white-noise looks bad).
+let _wavesNormalTex = null;
+function getWavesNormalTexture() {
+  if (_wavesNormalTex) return _wavesNormalTex;
+  const size = 512;
+  const c = makeCanvas(size);
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      // Multi-octave sin waves -> rolling wave normals
+      const u = (x / size) * Math.PI * 4;
+      const v = (y / size) * Math.PI * 4;
+      const h =
+        Math.sin(u * 1.0 + v * 0.3) * 0.5 +
+        Math.sin(u * 0.6 - v * 1.1) * 0.3 +
+        Math.sin(u * 2.4 + v * 1.7) * 0.2;
+      // numerical derivative
+      const du =
+        Math.cos(u * 1.0 + v * 0.3) * 1.0 +
+        Math.cos(u * 0.6 - v * 1.1) * 0.6 +
+        Math.cos(u * 2.4 + v * 1.7) * 2.4 * 0.2;
+      const dv =
+        Math.cos(u * 1.0 + v * 0.3) * 0.3 +
+        -Math.cos(u * 0.6 - v * 1.1) * 1.1 * 0.3 +
+        Math.cos(u * 2.4 + v * 1.7) * 1.7 * 0.2;
+      const i = (y * size + x) * 4;
+      d[i]     = 128 + du * 40;
+      d[i + 1] = 128 + dv * 40;
+      d[i + 2] = 255;
+      d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  _wavesNormalTex = new THREE.CanvasTexture(c);
+  _wavesNormalTex.wrapS = _wavesNormalTex.wrapT = THREE.RepeatWrapping;
+  _wavesNormalTex.colorSpace = THREE.NoColorSpace;
+  _wavesNormalTex.needsUpdate = true;
+  return _wavesNormalTex;
+}
+
+// Track the live Water meshes so we can advance their time uniform from tickWater().
+const _waters = new Set();
+
+function buildWaterPlane(width, depth, { sunDir = new THREE.Vector3(0.5, 1, 0.5).normalize() } = {}) {
+  const geo = new THREE.PlaneGeometry(width, depth, 1, 1);
+  const water = new Water(geo, {
+    textureWidth: 512,
+    textureHeight: 512,
+    waterNormals: getWavesNormalTexture(),
+    sunDirection: sunDir.clone(),
+    sunColor: 0xfff4d6,
+    waterColor: 0x1a5a8a,
+    distortionScale: 2.2,
+    fog: true,
+    alpha: 0.95,
+  });
+  water.rotation.x = -Math.PI / 2;
+  water.material.uniforms.size.value = 6.0;
+  _waters.add(water);
+  return water;
+}
+
+// Cheap fallback (used by low-quality / when Water class fails for some reason).
 function buildReflectorWater(width, depth, resolution = 1024) {
   const geo = new THREE.PlaneGeometry(width, depth);
   const reflector = new Reflector(geo, {
@@ -265,7 +334,6 @@ function buildReflectorWater(width, depth, resolution = 1024) {
   reflector.rotateX(-Math.PI / 2);
   _reflectors.add(reflector);
 
-  // Add a thin translucent tint plane just above so we get water color + ripple.
   const tintGeo = new THREE.PlaneGeometry(width, depth);
   const tintMat = new THREE.MeshStandardMaterial({
     color: 0x2a6db5,
@@ -365,15 +433,21 @@ export function applyMaterial(surfaceType, mesh, region = null) {
   if (!mesh) return mesh;
 
   if (surfaceType === 'water') {
-    // Reflector replaces the mesh's material via a custom shader. We add a
-    // Reflector child to the mesh so the engine's scene placement still works.
-    let width = region?.w ?? 50;
-    let depth = region?.d ?? 50;
-    const reflector = buildReflectorWater(width, depth, 1024);
-    // Hide the engine's placeholder mesh; we'll render the reflector at its position.
+    // Try the real three.js Water class first (sun glint + animated normals +
+    // proper screen-space reflections). Fall back to the Reflector if Water
+    // construction throws.
+    const width = region?.w ?? 50;
+    const depth = region?.d ?? 50;
+    let waterMesh = null;
+    try {
+      waterMesh = buildWaterPlane(width, depth);
+    } catch (err) {
+      console.warn('[materials] Water class failed; falling back to Reflector', err);
+      waterMesh = buildReflectorWater(width, depth, 1024);
+    }
     mesh.visible = false;
-    reflector.position.set(0, 0.01, 0);
-    mesh.add(reflector);
+    waterMesh.position.set(0, 0.01, 0);
+    mesh.add(waterMesh);
     return mesh;
   }
 
