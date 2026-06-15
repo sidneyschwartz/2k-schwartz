@@ -1,7 +1,9 @@
-// Menu router. Mounts the chosen sport into #sport-host.
+// Menu router. For golf we open the lobby first; for tennis we keep the
+// original behaviour (its own lobby is inside the module).
 
 import { mountTennis } from './sports/tennis.js';
 import { mountGolf } from './sports/golf/golf.js';
+import { showLobby } from './sports/golf/lobby.js';
 
 const menu = document.getElementById('menu');
 const host = document.getElementById('sport-host');
@@ -15,12 +17,20 @@ function showMenu() {
   menu.classList.remove('hidden');
 }
 
-function showSport(sport) {
+async function showSport(sport) {
   menu.classList.add('hidden');
   host.classList.remove('hidden');
   host.innerHTML = '';
-  if (sport === 'tennis') unmount = mountTennis(host, showMenu);
-  else if (sport === 'golf') unmount = mountGolf(host, showMenu);
+  if (sport === 'tennis') {
+    unmount = mountTennis(host, showMenu);
+    return;
+  }
+  if (sport === 'golf') {
+    const cfg = await showLobby(host);
+    if (!cfg) { showMenu(); return; }
+    host.innerHTML = '';
+    unmount = mountGolf(host, { ...cfg, onExit: showMenu });
+  }
 }
 
 document.querySelectorAll('.sport:not(.disabled)').forEach((b) => {

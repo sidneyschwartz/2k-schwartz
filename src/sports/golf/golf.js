@@ -183,6 +183,14 @@ export function mountGolf(host, onExit) {
 
   // ---- HUD ----
   let unmountHud = null;
+  // Queue HUD method calls fired before the async HUD module finishes loading.
+  const pendingHudCalls = [];
+  function flushHudQueue() {
+    while (pendingHudCalls.length) {
+      const fn = pendingHudCalls.shift();
+      try { fn(); } catch {}
+    }
+  }
   const hudHost = document.createElement('div');
   hudHost.style.position = 'fixed';
   hudHost.style.inset = '0';
@@ -210,6 +218,7 @@ export function mountGolf(host, onExit) {
       const mod = await import('./hud.js');
       if (mod?.mountHud) {
         unmountHud = mod.mountHud(hudHost, getters);
+        flushHudQueue();
         return;
       }
     } catch (err) {
@@ -217,6 +226,7 @@ export function mountGolf(host, onExit) {
       console.warn('[golf] hud.js not available, using fallback HUD:', err?.message);
     }
     unmountHud = mountFallbackHud(hudHost, getters);
+    flushHudQueue();
   })();
 
   // ---- Back / reset UI ----
@@ -257,6 +267,114 @@ export function mountGolf(host, onExit) {
     swing.reset();
     completeBanner.style.display = 'none';
     resetBtn.style.display = 'none';
+  }
+
+  function onHoleComplete() {
+    if (!isMultiplayer || !net) return;
+    // Record locally + tell server. Server emits scorecard update back.
+    if (game.scorecard) {
+      const me = game.scorecard.players[game.mySlot];
+      if (me) me.scores[game.hole - 1] = game.strokes;
+    }
+    net.sendHoleComplete(game.strokes);
+    // Advance hole if there are more left.
+    if (game.hole < game.holeCount) {
+      // Brief settle delay so both clients see the "hole complete" banner.
+      setTimeout(() => { try { net.nextHole(); } catch {} }, 1500);
+    } else {
+      showHudToast?.('Match complete!');
+    }
+  }
+
+  // Called when the ball settles (after a shot stops moving).
+  function onBallSettled(bp) {
+    if (isMultiplayer && net && game.localActive) {
+      net.sendShotResult({
+        endPos: [bp.x, bp.y, bp.z],
+        strokes: game.strokes,
+      });
+      // If the hole isn't complete yet, end turn. Hole-complete handler below also calls notify.
+      if (!game.complete) {
+        net.endTurn();
+        game.localActive = false;
+        showHudToast?.("Opponent's turn");
+      }
+    }
+  }
+
+  // ---- Multiplayer connection ----
+  let net = null;
+  let showHudToast = null;
+  let setHudTurn = null;
+  if (isMultiplayer) {
+    setHudTurn = (t) => {
+      if (unmountHud?.setTurn) unmountHud.setTurn(t);
+      else pendingHudCalls.push(() => unmountHud?.setTurn?.(t));
+    };
+    showHudToast = (t) => {
+      if (unmountHud?.showToast) unmountHud.showToast(t);
+      else pendingHudCalls.push(() => unmountHud?.showToast?.(t));
+    };
+    net = connectGolf({
+      code,
+      character,
+      onEvent: (e) => {
+        if (e.type === 'joined') {
+          game.mySlot = e.slot;
+          game.localActive = (e.slot === 0); // host starts as active by default
+          setHudTurn?.(e.slot === 0 ? 'Waiting for opponent…' : 'Joined. Waiting for host…');
+        } else if (e.type === 'start') {
+          showHudToast?.('Match start!');
+          setHudTurn?.(game.localActive ? 'Your turn' : "Opponent's turn");
+        } else if (e.type === 'turn') {
+          game.activeSlot = e.turn;
+          game.localActive = (e.turn === game.mySlot);
+          setHudTurn?.(game.localActive ? 'Your turn' : "Opponent's turn");
+          // When it becomes your turn after a hole reset, ensure ball is on tee for new hole.
+        } else if (e.type === 'opponent-shot') {
+          // Stub: engine can play a swing animation here. For Phase 4 we just teleport on result.
+        } else if (e.type === 'opponent-shot-result') {
+          // Spectator: teleport the ball to the opponent's landing position.
+          const [x, y, z] = e.endPos || [0, 0, 0];
+          physics.ball.velocity.set(0, 0, 0);
+          physics.ball.angularVelocity.set(0, 0, 0);
+          physics.ball.position.set(x, Math.max(y, physics.BALL_RADIUS), z);
+          physics.ball.wakeUp();
+          game.strokes = e.strokes || game.strokes;
+        } else if (e.type === 'scorecard') {
+          if (game.scorecard && Array.isArray(e.scorecard)) {
+            e.scorecard.forEach((perPlayer, slotIdx) => {
+              if (game.scorecard.players[slotIdx]) {
+                game.scorecard.players[slotIdx].scores = perPlayer.slice();
+              }
+            });
+          }
+        } else if (e.type === 'next-hole') {
+          // server: hole index advanced; reset local state for the new hole
+          const newHole = (e.hole || 0) + 1;
+          game.hole = newHole;
+          game.par = game.holes[e.hole]?.par ?? 4;
+          game.strokes = 0;
+          game.complete = false;
+          if (game.scorecard) game.scorecard.currentHole = newHole;
+          placeBallOnTee();
+          swing.reset();
+          completeBanner.style.display = 'none';
+          resetBtn.style.display = 'none';
+          game.activeSlot = e.turn;
+          game.localActive = (e.turn === game.mySlot);
+          setHudTurn?.(game.localActive ? 'Your turn' : "Opponent's turn");
+          showHudToast?.(`Hole ${newHole}`);
+        } else if (e.type === 'opponent-left') {
+          showHudToast?.('Opponent left');
+          setHudTurn?.('Opponent left');
+        } else if (e.type === 'error') {
+          showHudToast?.(e.error || 'network error');
+        } else if (e.type === 'closed') {
+          setHudTurn?.('Disconnected');
+        }
+      },
+    });
   }
 
   // ---- Game loop ----
@@ -306,6 +424,7 @@ export function mountGolf(host, onExit) {
         if (game.settleTimer > 0.6) {
           game.inFlight = false;
           game.settleTimer = 0;
+          onBallSettled(bp);
         }
       } else {
         game.settleTimer = 0;
@@ -320,6 +439,7 @@ export function mountGolf(host, onExit) {
       if (distXZ < HOLE_RADIUS * 1.3 && bp.y < physics.BALL_RADIUS * 2) {
         game.complete = true;
         game.inFlight = false;
+        onHoleComplete();
         completeBanner.textContent = `Hole complete in ${game.strokes} stroke${game.strokes === 1 ? '' : 's'}`;
         completeBanner.style.display = 'block';
         resetBtn.style.display = 'inline-block';
@@ -335,12 +455,33 @@ export function mountGolf(host, onExit) {
   }
   rafId = requestAnimationFrame(tick);
 
+  // ---- Controller (exposed for net.js / external integrations) ----
+  const controller = {
+    state: game,
+    isMultiplayer,
+    mode,
+    setActive(b) { game.localActive = !!b; },
+    applyShot() { /* engine can render opponent swing here */ },
+    applyShotResult({ endPos }) {
+      const [x, y, z] = endPos || [0, 0, 0];
+      physics.ball.velocity.set(0, 0, 0);
+      physics.ball.angularVelocity.set(0, 0, 0);
+      physics.ball.position.set(x, Math.max(y, physics.BALL_RADIUS), z);
+      physics.ball.wakeUp();
+    },
+    notifyHoleComplete(strokes) { net?.sendHoleComplete(strokes); },
+    nextHole() { net?.nextHole(); },
+    endTurn() { net?.endTurn(); },
+  };
+  host._golfController = controller;
+
   // ---- Unmount ----
   return function unmount() {
     stopped = true;
     cancelAnimationFrame(rafId);
     swing.detach(window);
     try { unmountHud?.(); } catch {}
+    try { net?.close(); } catch {}
     try { physics.dispose(); } catch {}
     try { disposeScene(); } catch {}
     host.innerHTML = '';

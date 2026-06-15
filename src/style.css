@@ -2,9 +2,15 @@
   --bg: #0b1020;
   --fg: #e7ecff;
   --accent: #6cf;
+  --accent-2: #ffd24a;
   --muted: #7a85a8;
   --green-1: #1e6e3a;
   --green-2: #3aa55a;
+  --panel: rgba(12, 18, 38, 0.78);
+  --panel-strong: rgba(12, 18, 38, 0.92);
+  --panel-border: rgba(180, 200, 255, 0.18);
+  --good: #57e08a;
+  --bad: #ff5d6d;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -16,45 +22,64 @@ body {
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 #app { width: min(1100px, 98vw); }
 .screen { text-align: center; padding: 2rem 1rem; }
-.hidden { display: none; }
+.hidden { display: none !important; }
 h1 { font-size: 3rem; margin: 0 0 0.5rem; letter-spacing: 0.04em; }
 .tag { color: var(--muted); margin-bottom: 2rem; }
 
+/* ---------------- Menu sport tiles ---------------- */
 .sports { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; max-width: 480px; margin: 0 auto; }
 .sport {
   background: #182040;
   color: var(--fg);
   border: 1px solid #2a3568;
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 1.5rem 1rem;
   font-size: 1.1rem;
   cursor: pointer;
-  transition: transform 0.1s, background 0.15s;
+  transition: transform 0.12s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
-.sport:hover:not(.disabled) { background: #21306b; transform: translateY(-2px); }
+.sport:hover:not(.disabled) {
+  background: #21306b;
+  transform: translateY(-3px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+.sport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
 .sport[data-sport="golf"] {
   background: linear-gradient(135deg, var(--green-1), var(--green-2));
   border-color: #2a8d4a;
 }
-.sport[data-sport="golf"]:hover { filter: brightness(1.1); transform: translateY(-2px); }
+.sport[data-sport="golf"]:hover { filter: brightness(1.12); transform: translateY(-3px); }
 .sport.disabled { opacity: 0.4; cursor: not-allowed; }
 
 .lobby-row { display: flex; gap: 0.5rem; justify-content: center; margin: 1rem 0; }
 .code-input {
   background: #182040; color: var(--fg); border: 1px solid #2a3568;
-  padding: 0.75rem 1rem; font-size: 1.2rem; letter-spacing: 0.2em;
-  text-transform: uppercase; text-align: center; border-radius: 8px;
-  width: 180px;
+  padding: 0.75rem 1rem; font-size: 1.4rem; letter-spacing: 0.32em;
+  text-transform: uppercase; text-align: center; border-radius: 10px;
+  width: 200px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
+.code-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .btn {
   background: var(--accent); color: #001; border: 0;
   padding: 0.75rem 1.25rem; font-weight: 600; border-radius: 8px; cursor: pointer;
+  transition: filter 0.1s ease, transform 0.1s ease;
 }
-.btn.ghost { background: transparent; color: var(--muted); }
+.btn:hover { filter: brightness(1.08); }
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.btn--primary { background: linear-gradient(135deg, #6cf, #5acfff); }
+.btn.ghost { background: transparent; color: var(--muted); border: 1px solid #2a3568; }
+.btn.ghost:hover { color: var(--fg); border-color: #4a5896; }
 .back { background: transparent; color: var(--muted); margin-top: 1rem; border: 0; cursor: pointer; }
+.back:hover { color: var(--fg); }
 .status { color: var(--muted); min-height: 1.5em; }
 
 .hud {
@@ -72,3 +97,273 @@ canvas { display: block; }
   z-index: 0;
 }
 .hint { color: var(--muted); font-size: 0.9rem; }
+
+/* ---------------- Golf lobby ---------------- */
+.lobby {
+  position: relative;
+  min-height: 80vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lobby-shell {
+  width: min(720px, 96vw);
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+.lobby-header { margin-bottom: 1.5rem; }
+.lobby-title { font-size: 2.1rem; margin: 0 0 0.25rem; letter-spacing: 0.02em; }
+.lobby-tag { color: var(--muted); margin: 0; }
+.lobby-body { min-height: 240px; }
+.lobby-back {
+  background: transparent; color: var(--muted);
+  border: 0; padding: 0.6rem 0.8rem; cursor: pointer;
+  margin-top: 1.25rem;
+}
+.lobby-back:hover { color: var(--fg); }
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+.mode-tile {
+  background: linear-gradient(160deg, #1a2249, #131a37);
+  border: 1px solid #2a3568;
+  border-radius: 14px;
+  padding: 1.25rem 1rem 1.1rem;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: center;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  display: flex; flex-direction: column; gap: 0.4rem; align-items: center;
+}
+.mode-tile:hover {
+  transform: translateY(-4px);
+  border-color: #4a5cb8;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.mode-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mode-tile--primary {
+  background: linear-gradient(160deg, #235c33, #2f8a4a);
+  border-color: #3aa55a;
+}
+.mode-tile__icon { font-size: 1.8rem; }
+.mode-tile__name { font-weight: 700; font-size: 1.05rem; }
+.mode-tile__sub { color: var(--muted); font-size: 0.85rem; }
+
+.lobby-step {
+  padding: 1rem 0;
+}
+.lobby-step__title { font-size: 1.4rem; margin: 0 0 0.4rem; }
+.lobby-step__hint { color: var(--muted); margin: 0 0 1.25rem; }
+.lobby-step__actions {
+  display: flex; gap: 0.6rem; justify-content: center; margin-top: 1.25rem;
+}
+.lobby-error { color: var(--bad); font-size: 0.9rem; min-height: 1.2em; margin: 0.5rem 0 0; }
+
+.code-card {
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 1.25rem;
+  display: inline-flex; align-items: center; gap: 1rem;
+  margin: 0 auto;
+}
+.code-card__code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 2.4rem;
+  letter-spacing: 0.4em;
+  font-weight: 700;
+  color: var(--accent-2);
+}
+
+/* ---------------- Spinner ---------------- */
+.spinner {
+  display: inline-block;
+  width: 22px; height: 22px;
+  border: 3px solid rgba(255,255,255,0.18);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+  vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------------- Golf HUD ---------------- */
+.golf-hud {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  color: var(--fg);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+}
+.golf-hud__topbar {
+  position: absolute; top: 16px; left: 16px; right: 16px;
+  display: flex; justify-content: space-between; gap: 12px;
+}
+.golf-hud__bottombar {
+  position: absolute; bottom: 16px; left: 16px; right: 16px;
+  display: flex; justify-content: space-between; gap: 12px;
+  align-items: flex-end;
+}
+.golf-hud__panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  pointer-events: auto;
+}
+.golf-hud__label {
+  font-size: 10px; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--muted);
+}
+.golf-hud__hole-num, .golf-hud__strokes-num {
+  font-size: 1.8rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+}
+.golf-hud__hole-par { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+.golf-hud__wind-row { display: flex; align-items: center; gap: 8px; }
+.golf-hud__wind-arrow { transition: transform 0.25s ease; }
+.golf-hud__wind-speed { font-size: 1.2rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.golf-hud__wind-speed small { font-size: 0.6em; color: var(--muted); margin-left: 2px; }
+
+.golf-hud__turnbar {
+  position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 0.85rem; font-weight: 600; letter-spacing: 0.08em;
+}
+
+.golf-hud__club {
+  min-width: 220px;
+}
+.golf-hud__club-row {
+  display: flex; align-items: center; gap: 8px; margin-top: 2px;
+}
+.golf-hud__club-btn {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid var(--panel-border);
+  color: var(--fg);
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px; line-height: 1;
+}
+.golf-hud__club-btn:hover { background: rgba(255,255,255,0.16); }
+.golf-hud__club-mid { flex: 1; text-align: center; }
+.golf-hud__club-name { font-size: 1.1rem; font-weight: 700; }
+.golf-hud__club-est { font-size: 0.8rem; color: var(--muted); }
+.golf-hud__club-hint { font-size: 0.7rem; color: var(--muted); margin-top: 4px; text-align: center; }
+
+.golf-hud__meter {
+  min-width: min(380px, 50vw);
+  flex: 1;
+  max-width: 460px;
+  margin: 0 auto;
+}
+.golf-hud__meter-phase {
+  font-size: 0.8rem; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 6px; text-align: center;
+}
+.golf-hud__meter[data-phase="rising"] .golf-hud__meter-phase,
+.golf-hud__meter[data-phase="power-rising"] .golf-hud__meter-phase {
+  color: var(--accent-2);
+}
+.golf-hud__meter[data-phase="accuracy"] .golf-hud__meter-phase {
+  color: var(--good);
+}
+.golf-hud__meter-track {
+  position: relative;
+  height: 18px;
+  background: rgba(0,0,0,0.5);
+  border: 1px solid var(--panel-border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.golf-hud__meter-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 0%;
+  background: linear-gradient(90deg, #3aa55a 0%, #ffeb3b 60%, #ff5d6d 100%);
+  transition: none;
+}
+.golf-hud__meter-lock {
+  position: absolute; top: -3px; bottom: -3px;
+  width: 3px; background: #fff; left: 0%;
+  box-shadow: 0 0 6px rgba(255,255,255,0.8);
+}
+.golf-hud__meter-zone {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(87, 224, 138, 0.32);
+  border-left: 1px solid rgba(87,224,138,0.7);
+  border-right: 1px solid rgba(87,224,138,0.7);
+}
+.golf-hud__meter-needle {
+  position: absolute; top: -4px; bottom: -4px;
+  width: 3px; background: #fff; left: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 0 6px rgba(255,255,255,0.9);
+}
+.golf-hud__meter-scale {
+  display: flex; justify-content: space-between;
+  margin-top: 4px;
+  font-size: 0.7rem; color: var(--muted);
+}
+
+.golf-hud__scorecard {
+  position: absolute;
+  top: 90px; right: 16px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  min-width: 220px;
+  pointer-events: auto;
+}
+.golf-hud__sc-title {
+  font-size: 0.7rem; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--muted);
+  margin-bottom: 4px;
+}
+.golf-hud__sc-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 0.85rem; font-variant-numeric: tabular-nums;
+}
+.golf-hud__sc-table th, .golf-hud__sc-table td {
+  padding: 3px 6px; text-align: center;
+}
+.golf-hud__sc-table thead th {
+  color: var(--muted); font-weight: 500; font-size: 0.75rem;
+}
+.golf-hud__sc-table tbody th {
+  text-align: left; font-weight: 600;
+}
+.golf-hud__sc-table tr + tr td, .golf-hud__sc-table tr + tr th {
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+
+.golf-hud__toast {
+  position: absolute;
+  top: 80px; left: 50%; transform: translateX(-50%);
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  pointer-events: none;
+  animation: toast-in 0.2s ease-out;
+}
+.golf-hud__toast--out { animation: toast-out 0.2s ease-out forwards; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, -10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes toast-out {
+  to { opacity: 0; transform: translate(-50%, -10px); }
+}
