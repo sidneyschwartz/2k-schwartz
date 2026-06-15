@@ -1,5 +1,9 @@
 // Integration: spin up the WS server, connect two clients, walk the golf turn
 // protocol end-to-end without a browser.
+//
+// Each client buffers every message it receives so we never miss one due to a
+// listener being attached a tick too late (the server broadcasts 'start'/'state'
+// the instant the room fills).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -8,20 +12,27 @@ import { WebSocket } from 'ws';
 const PORT = 4321;
 const ROOM = 'TST';
 
-function waitMsg(ws, predicate, timeoutMs = 1500) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('timed out waiting for ws message')), timeoutMs);
-    function onMsg(raw) {
-      let msg;
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
-      if (predicate(msg)) {
-        clearTimeout(t);
-        ws.off('message', onMsg);
-        resolve(msg);
-      }
-    }
-    ws.on('message', onMsg);
+function makeClient(ws) {
+  const buf = [];
+  ws.on('message', (raw) => {
+    try { buf.push(JSON.parse(raw.toString())); } catch {}
   });
+  return {
+    ws,
+    buf,
+    send(obj) { ws.send(JSON.stringify(obj)); },
+    // Wait until a buffered message matches, scanning past + future messages.
+    async waitFor(predicate, timeoutMs = 2000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const hit = buf.find(predicate);
+        if (hit) return hit;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      throw new Error('timed out waiting for ws message; buffer=' + JSON.stringify(buf));
+    },
+    close() { ws.close(); },
+  };
 }
 
 async function bootServer() {
@@ -30,62 +41,51 @@ async function bootServer() {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   await new Promise((resolve) => {
-    child.stdout.on('data', (chunk) => {
-      if (chunk.toString().includes(`${PORT}`)) resolve();
-    });
-    setTimeout(resolve, 800); // safety
+    child.stdout.on('data', (chunk) => { if (chunk.toString().includes(`${PORT}`)) resolve(); });
+    setTimeout(resolve, 1000);
   });
   return child;
 }
 
 async function openClient() {
   const ws = new WebSocket(`ws://localhost:${PORT}`);
-  await new Promise((resolve, reject) => {
-    ws.once('open', resolve);
-    ws.once('error', reject);
-  });
-  return ws;
+  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+  return makeClient(ws);
 }
 
-test('two clients can join the same golf room and exchange shots', async (t) => {
+test('two clients join a golf room, only the active player can shoot, turn flips', async (t) => {
   const server = await bootServer();
   t.after(() => server.kill());
 
   const a = await openClient();
   const b = await openClient();
 
-  const aJoined = waitMsg(a, (m) => m.type === 'joined');
-  a.send(JSON.stringify({ type: 'join', sport: 'golf', code: ROOM }));
-  const aJ = await aJoined;
+  a.send({ type: 'join', sport: 'golf', code: ROOM });
+  const aJ = await a.waitFor((m) => m.type === 'joined');
   assert.equal(aJ.slot, 0);
 
-  const bJoined = waitMsg(b, (m) => m.type === 'joined');
-  b.send(JSON.stringify({ type: 'join', sport: 'golf', code: ROOM }));
-  const bJ = await bJoined;
+  b.send({ type: 'join', sport: 'golf', code: ROOM });
+  const bJ = await b.waitFor((m) => m.type === 'joined');
   assert.equal(bJ.slot, 1);
 
-  // Both clients should receive 'start' when the room fills.
-  await waitMsg(a, (m) => m.type === 'start');
-  await waitMsg(b, (m) => m.type === 'start');
+  // Both should see 'start' once the room fills (buffered, so no race).
+  await a.waitFor((m) => m.type === 'start');
+  await b.waitFor((m) => m.type === 'start');
 
-  // A (slot 0) shoots. Server should reject B trying to shoot.
-  const bRejected = waitMsg(b, (m) => m.type === 'error');
-  b.send(JSON.stringify({ type: 'shot', shot: { club: 'Driver', power: 0.8 } }));
-  const err = await bRejected;
+  // B (slot 1) is not the active player (turn defaults to 0) → server rejects its shot.
+  b.send({ type: 'shot', shot: { club: 'Driver', power: 0.8 } });
+  const err = await b.waitFor((m) => m.type === 'error');
   assert.match(err.error || '', /turn/i);
 
-  // A shoots — B should see the shot.
-  const bSeesShot = waitMsg(b, (m) => m.type === 'shot' && m.slot === 0);
-  a.send(JSON.stringify({ type: 'shot', shot: { club: 'Driver', power: 0.9 } }));
-  await bSeesShot;
+  // A (slot 0) shoots — B should see the relayed shot.
+  a.send({ type: 'shot', shot: { club: 'Driver', power: 0.9 } });
+  await b.waitFor((m) => m.type === 'shot' && m.slot === 0);
 
-  // A's shot result + end-turn flips the active player.
-  a.send(JSON.stringify({
-    type: 'shot-result',
-    result: { endPos: [0, 0, 80], strokes: 1 },
-  }));
-  a.send(JSON.stringify({ type: 'end-turn' }));
-  const turn = await waitMsg(b, (m) => m.type === 'turn' || (m.type === 'state' && typeof m.turn === 'number'));
+  // A reports the result and ends its turn → turn flips to slot 1.
+  a.send({ type: 'shot-result', result: { endPos: [0, 0, 80], strokes: 1 } });
+  a.send({ type: 'end-turn' });
+  // Wait specifically for the flip to slot 1 (an earlier buffered 'state' has turn:0).
+  const turn = await b.waitFor((m) => (m.type === 'turn' || m.type === 'state') && m.turn === 1);
   assert.equal(turn.turn, 1);
 
   a.close(); b.close();
@@ -94,10 +94,25 @@ test('two clients can join the same golf room and exchange shots', async (t) => 
 test('rejects join with no code', async (t) => {
   const server = await bootServer();
   t.after(() => server.kill());
-  const ws = await openClient();
-  const errP = waitMsg(ws, (m) => m.type === 'error');
-  ws.send(JSON.stringify({ type: 'join', sport: 'golf', code: '' }));
-  const err = await errP;
+  const c = await openClient();
+  c.send({ type: 'join', sport: 'golf', code: '' });
+  const err = await c.waitFor((m) => m.type === 'error');
   assert.match(err.error || '', /code/i);
-  ws.close();
+  c.close();
+});
+
+test('third client is rejected from a full room', async (t) => {
+  const server = await bootServer();
+  t.after(() => server.kill());
+  const a = await openClient();
+  const b = await openClient();
+  const c = await openClient();
+  a.send({ type: 'join', sport: 'golf', code: 'FULL' });
+  await a.waitFor((m) => m.type === 'joined');
+  b.send({ type: 'join', sport: 'golf', code: 'FULL' });
+  await b.waitFor((m) => m.type === 'joined');
+  c.send({ type: 'join', sport: 'golf', code: 'FULL' });
+  const err = await c.waitFor((m) => m.type === 'error');
+  assert.match(err.error || '', /full/i);
+  a.close(); b.close(); c.close();
 });
