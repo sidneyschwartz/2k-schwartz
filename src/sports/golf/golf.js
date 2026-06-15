@@ -12,13 +12,23 @@ import { createScene } from './scene.js';
 import { createPhysics } from './physics.js';
 import { createSwingController } from './swing.js';
 import { clubs } from './clubs.js';
+import { connectGolf } from './net.js';
 
 const HOLE_LENGTH = 150;          // m from tee to pin (par 3)
 const HOLE_RADIUS = 0.108;        // real golf hole radius (m)
 const PIN_POS = new THREE.Vector3(0, 0, HOLE_LENGTH);
 const TEE_POS = new THREE.Vector3(0, 0, 0);
 
-export function mountGolf(host, onExit) {
+// Accepts either:
+//   mountGolf(host, onExitFn)                       — legacy single-player
+//   mountGolf(host, { mode, code, character, onExit }) — lobby config
+export function mountGolf(host, configOrOnExit) {
+  let _cfg = {};
+  if (typeof configOrOnExit === 'function') _cfg = { onExit: configOrOnExit };
+  else if (configOrOnExit && typeof configOrOnExit === 'object') _cfg = configOrOnExit;
+  const { mode = 'single', code = null, character = null, onExit } = _cfg;
+  const isMultiplayer = mode === 'host' || mode === 'join';
+
   host.innerHTML = '';
   host.style.position = 'relative';
 
@@ -132,6 +142,27 @@ export function mountGolf(host, onExit) {
     wind: { speed: 0, dirDeg: 0 }, // wind not applied yet — placeholder so HUD compiles
     flightStart: 0,
     settleTimer: 0,
+    // multiplayer
+    mySlot: 0,
+    activeSlot: 0,
+    localActive: !isMultiplayer,
+    hole: 1,
+    par: 3,
+    holeCount: isMultiplayer ? 3 : 1,
+    holes: [
+      { par: 3, length: HOLE_LENGTH },
+      { par: 4, length: 250 },
+      { par: 5, length: 320 },
+    ],
+    scorecard: isMultiplayer ? {
+      players: [
+        { name: character?.name || 'You', scores: [] },
+        { name: 'Opponent', scores: [] },
+      ],
+      par: [3, 4, 5],
+      holeCount: 3,
+      currentHole: 1,
+    } : null,
   };
 
   // ---- Swing controller ----
@@ -143,9 +174,21 @@ export function mountGolf(host, onExit) {
 
   function launchShot({ club, power, accuracyError, aimYaw, stance }) {
     if (game.complete) return;
+    if (isMultiplayer && !game.localActive) return;
     game.strokes += 1;
     game.inFlight = true;
     game.flightStart = performance.now();
+
+    if (isMultiplayer && net) {
+      const ball = physics.ball.position;
+      net.sendShot({
+        club: club.name,
+        power,
+        accuracy: accuracyError,
+        aim: aimYaw,
+        startPos: [ball.x, ball.y, ball.z],
+      });
+    }
 
     // Compute launch velocity in world space.
     // Direction toward pin from ball, rotated by aimYaw + small stance bias.
@@ -204,11 +247,11 @@ export function mountGolf(host, onExit) {
     getClubList: () => clubs,
     getWind: () => game.wind,
     getStrokes: () => game.strokes,
-    getHole: () => 1,
-    getPar: () => 3,
-    getHoleInfo: () => ({ par: 3, number: 1, length: HOLE_LENGTH }),
+    getHole: () => game.hole,
+    getPar: () => game.par,
+    getHoleInfo: () => ({ par: game.par, number: game.hole, length: HOLE_LENGTH }),
     getClubs: () => clubs,                  // legacy alias for fallback HUD
-    getScorecard: () => null,
+    getScorecard: () => game.scorecard,
     setClub: (name) => swing.setClub(name),
     onSelectClub: (name) => swing.setClub(name),
   };
