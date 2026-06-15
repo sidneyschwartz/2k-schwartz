@@ -139,16 +139,48 @@ export function createPhysics() {
     const k = 0.5 * AIR_DENSITY * Cd * FRONTAL_AREA * relSpeed;
     _drag.set(-_vRel.x * k, -_vRel.y * k, -_vRel.z * k);
     ball.applyForce(_drag, ball.position);
-    // Magnus: F = k * (omega x vRel)
+    // Magnus: F = MAGNUS_K * (omega x vRel).
+    // NOTE: the cross product already carries one factor of |vRel|, so we must NOT
+    // multiply by relSpeed again — doing so makes the force scale with v^2, which at
+    // driver speeds (~67 m/s) produces ~700 m/s^2 and blows up the explicit integrator
+    // into NaN. A single MAGNUS_K scalar is correct and stable.
     const w = ball.angularVelocity;
     _magnus.set(
       w.y * _vRel.z - w.z * _vRel.y,
       w.z * _vRel.x - w.x * _vRel.z,
       w.x * _vRel.y - w.y * _vRel.x,
     );
-    _magnus.scale(MAGNUS_K * relSpeed, _magnus);
+    _magnus.scale(MAGNUS_K, _magnus);
     ball.applyForce(_magnus, ball.position);
   }
+
+  // Safety net: clamp absurd speeds and reset any non-finite state so a single bad
+  // step can never propagate NaN into the renderer/camera.
+  const MAX_SPEED = 120;   // m/s — above any real golf ball speed
+  const MAX_SPIN = 600;    // rad/s — clamp angular velocity too (Magnus input)
+  const MAX_POS = 2000;    // m — no hole is bigger; anything past this is a blow-up
+  let _lastSafePos = new CANNON.Vec3(0, BALL_RADIUS, 0);
+  function sanitize() {
+    const p = ball.position, v = ball.velocity, w = ball.angularVelocity;
+    const finite = Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z) &&
+                   Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+    const sane = finite && Math.abs(p.x) < MAX_POS && Math.abs(p.y) < MAX_POS && Math.abs(p.z) < MAX_POS;
+    if (!sane) {
+      // Snap back to the last known-good position, dead stop.
+      ball.position.set(_lastSafePos.x, _lastSafePos.y, _lastSafePos.z);
+      ball.velocity.set(0, 0, 0);
+      ball.angularVelocity.set(0, 0, 0);
+      ball.sleep();
+      return;
+    }
+    // Record good position and clamp extreme but finite values.
+    _lastSafePos.set(p.x, p.y, p.z);
+    const sp = v.length();
+    if (sp > MAX_SPEED) v.scale(MAX_SPEED / sp, v);
+    const wp = w.length();
+    if (wp > MAX_SPIN) w.scale(MAX_SPIN / wp, w);
+  }
+  function markSafePos(x, y, z) { _lastSafePos.set(x, y, z); }
 
   const FIXED_DT = 1 / 60;
   const MAX_SUBSTEPS = 6;
@@ -161,6 +193,7 @@ export function createPhysics() {
       applyAerodynamics();
       applyGreenSlope();
       world.step(FIXED_DT);
+      sanitize();
       accumulator -= FIXED_DT;
       steps += 1;
     }
@@ -182,6 +215,7 @@ export function createPhysics() {
     removeStaticBodies,
     setWind,
     setGreenSlope,
+    markSafePos,
     step,
     dispose,
     BALL_RADIUS,

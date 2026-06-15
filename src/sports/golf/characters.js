@@ -1,6 +1,12 @@
-// Stylized low-poly golfers built from primitives. No external rig — bones are
-// just nested THREE.Group nodes we tween between pose targets. The state machine
-// drives a normalized animation clock per state.
+// Humanoid golfers built procedurally with anatomically-correct proportions and
+// jointed limbs. Each character is a hierarchy of THREE.Group "bones" we drive
+// via direct rotation tweens; no GLB / skeletal rigging needed.
+//
+// Proportions roughly match 7-8 head-heights: head ≈ 1/7 of total height,
+// shoulder span ≈ 2 head-widths, arm reach to mid-thigh, legs ≈ 50% of height.
+//
+// Exports kept stable for callers (engine + character-select):
+//   createGolfer({ character }) -> { group, setSwingState(state), update(dt), name, character }
 
 import * as THREE from 'three';
 
@@ -9,207 +15,538 @@ const STATES = ['idle', 'address', 'backswing', 'downswing', 'follow', 'reset'];
 const PRESETS = {
   tiger: {
     name: 'Tiger Woods',
-    skin: 0x6b4a2b,
+    skin: 0x4f3621,
+    skinShadow: 0x3a2616,
+    hair: 0x111111,
     shirt: 0xcc1822,        // Sunday red
-    pants: 0x111111,
-    shoes: 0xffffff,
+    shirtCollar: 0xa3121a,
+    pants: 0x141414,
+    belt: 0x000000,
+    shoes: 0xf2f2f2,
+    shoeSole: 0x111111,
     hat: 0x000000,
+    hatLogo: 0xffffff,
     beard: null,
-    height: 1.83,
-    build: 0.95,            // slimmer
-    cap: 'visor',
+    eyeWhite: 0xefe8d4,
+    eyeIris: 0x2a1a0e,
+    lips: 0x6b3a2b,
+    height: 1.85,
+    build: 0.96,
+    cap: 'cap',             // changed: real Tiger uses a Nike cap
+    chest: 1.0,
+    shoulderWidth: 1.0,
   },
   brunson: {
     name: 'Jalen Brunson',
-    skin: 0x8a5a3b,
+    skin: 0x7a5236,
+    skinShadow: 0x5a3a26,
+    hair: 0x0e0e0e,
     shirt: 0x1f6dd6,        // Knicks blue
-    pants: 0xf5f5f5,
-    shoes: 0x222222,
-    hat: 0xf5731e,          // orange brim accent
+    shirtCollar: 0xff5f1a,  // Knicks orange
+    pants: 0xeeeeee,
+    belt: 0x101010,
+    shoes: 0x111111,
+    shoeSole: 0xeeeeee,
+    hat: null,              // no hat
+    hatLogo: null,
     beard: 0x1a1a1a,
+    eyeWhite: 0xeee6cf,
+    eyeIris: 0x2a1c10,
+    lips: 0x7a4634,
     height: 1.88,
     build: 1.12,            // stockier
-    cap: 'cap',
+    cap: 'none',
+    chest: 1.15,
+    shoulderWidth: 1.10,
   },
 };
 
-function mat(color, roughness = 0.7, metalness = 0.05) {
+function mat(color, roughness = 0.7, metalness = 0.0) {
   return new THREE.MeshStandardMaterial({ color, roughness, metalness });
 }
 
+// ---------- procedural face texture for the head ----------
+
+function makeFaceTexture(preset) {
+  const size = 256;
+  const c = (typeof OffscreenCanvas !== 'undefined')
+    ? new OffscreenCanvas(size, size)
+    : Object.assign(document.createElement('canvas'), { width: size, height: size });
+  const ctx = c.getContext('2d');
+
+  // Skin base
+  ctx.fillStyle = '#' + preset.skin.toString(16).padStart(6, '0');
+  ctx.fillRect(0, 0, size, size);
+
+  // Subtle shading on sides
+  const grad = ctx.createLinearGradient(0, 0, size, 0);
+  const shadow = '#' + preset.skinShadow.toString(16).padStart(6, '0');
+  grad.addColorStop(0, shadow);
+  grad.addColorStop(0.3, '#' + preset.skin.toString(16).padStart(6, '0'));
+  grad.addColorStop(0.7, '#' + preset.skin.toString(16).padStart(6, '0'));
+  grad.addColorStop(1, shadow);
+  ctx.fillStyle = grad;
+  ctx.globalAlpha = 0.45;
+  ctx.fillRect(0, 0, size, size);
+  ctx.globalAlpha = 1;
+
+  // Face area is the front of the sphere ≈ centered around u=0.5, v=0.5.
+  // Sphere UV maps so that the face occupies roughly the central third.
+  const cx = size * 0.5, cy = size * 0.5;
+
+  // Eyebrows
+  ctx.fillStyle = '#' + preset.hair.toString(16).padStart(6, '0');
+  ctx.fillRect(cx - 28, cy - 30, 18, 4);
+  ctx.fillRect(cx + 10, cy - 30, 18, 4);
+
+  // Eye sockets (slightly darker skin)
+  ctx.fillStyle = shadow;
+  ctx.beginPath(); ctx.ellipse(cx - 18, cy - 18, 11, 6, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(cx + 18, cy - 18, 11, 6, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Eye whites
+  ctx.fillStyle = '#' + preset.eyeWhite.toString(16).padStart(6, '0');
+  ctx.beginPath(); ctx.ellipse(cx - 18, cy - 18, 8, 4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(cx + 18, cy - 18, 8, 4, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Irises
+  ctx.fillStyle = '#' + preset.eyeIris.toString(16).padStart(6, '0');
+  ctx.beginPath(); ctx.arc(cx - 18, cy - 18, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + 18, cy - 18, 3, 0, Math.PI * 2); ctx.fill();
+
+  // Nose shadow
+  ctx.fillStyle = shadow;
+  ctx.globalAlpha = 0.55;
+  ctx.beginPath();
+  ctx.moveTo(cx - 5, cy - 8);
+  ctx.lineTo(cx - 6, cy + 12);
+  ctx.lineTo(cx, cy + 16);
+  ctx.lineTo(cx + 6, cy + 12);
+  ctx.lineTo(cx + 5, cy - 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Mouth
+  ctx.fillStyle = '#' + preset.lips.toString(16).padStart(6, '0');
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + 30, 12, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Beard for Brunson
+  if (preset.beard) {
+    ctx.fillStyle = '#' + preset.beard.toString(16).padStart(6, '0');
+    ctx.globalAlpha = 0.95;
+    // jaw shading
+    ctx.beginPath();
+    ctx.moveTo(cx - 50, cy + 22);
+    ctx.quadraticCurveTo(cx, cy + 75, cx + 50, cy + 22);
+    ctx.lineTo(cx + 38, cy + 50);
+    ctx.quadraticCurveTo(cx, cy + 70, cx - 38, cy + 50);
+    ctx.closePath();
+    ctx.fill();
+    // moustache
+    ctx.fillRect(cx - 18, cy + 22, 36, 4);
+    ctx.globalAlpha = 1;
+  }
+
+  // Hairline (Tiger has a low fade, Brunson short crop). The cap covers most of it.
+  if (preset.cap !== 'cap' || preset.beard) {
+    ctx.fillStyle = '#' + preset.hair.toString(16).padStart(6, '0');
+    ctx.beginPath();
+    ctx.moveTo(cx - 50, cy - 45);
+    ctx.quadraticCurveTo(cx, cy - 75, cx + 50, cy - 45);
+    ctx.lineTo(cx + 50, cy - 38);
+    ctx.quadraticCurveTo(cx, cy - 50, cx - 50, cy - 38);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// ---------- club ----------
+
 function buildClub() {
   const club = new THREE.Group();
+  const grip = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.014, 0.012, 0.20, 8),
+    mat(0x1a1a1a, 0.85),
+  );
+  grip.position.y = -0.1;
+  grip.castShadow = true;
+  club.add(grip);
   const shaft = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.008, 0.008, 1.05, 8),
+    new THREE.CylinderGeometry(0.008, 0.008, 0.90, 8),
     mat(0xcfcfd4, 0.3, 0.9),
   );
-  shaft.position.y = -0.5;
+  shaft.position.y = -0.65;
   shaft.castShadow = true;
   club.add(shaft);
+  // Wedge-style head: angled flat box
   const head = new THREE.Mesh(
-    new THREE.BoxGeometry(0.10, 0.05, 0.04),
-    mat(0x222226, 0.4, 0.8),
+    new THREE.BoxGeometry(0.10, 0.06, 0.025),
+    mat(0x2a2a2e, 0.35, 0.85),
   );
-  head.position.set(0.05, -1.02, 0);
+  head.position.set(0.045, -1.08, 0);
+  head.rotation.z = -0.18;
   head.castShadow = true;
   club.add(head);
   return club;
 }
 
+// ---------- humanoid build ----------
+
 function buildGolfer(preset) {
+  const H = preset.height;
+  const headSize = H / 7.5;                  // 7.5-head proportions for slightly stylized look
+  const torsoLen = H * 0.30;
+  const hipsY = H * 0.50;                    // hip joint height
+  const shoulderY = hipsY + torsoLen;        // shoulder joint height
+  const upperLeg = H * 0.27;
+  const lowerLeg = H * 0.23;
+  const upperArm = H * 0.18;
+  const foreArm = H * 0.16;
+  const shoulderHalf = (headSize * 1.45) * preset.shoulderWidth;
+  const hipHalf = (headSize * 1.05);
+
   const root = new THREE.Group();
   root.name = `golfer-${preset.name}`;
-  const scaleY = preset.height / 1.8;
-  const scaleX = preset.build;
 
-  // Torso pivot: rotates for swing. Hips group sits at ~waist height (1.0m * scale).
+  // Hips group sits at hip height; everything else hangs off this.
   const hips = new THREE.Group();
-  hips.position.y = 1.0 * scaleY;
+  hips.position.y = hipsY;
   root.add(hips);
 
-  // Lower body (static relative to hips)
-  const legL = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.09 * scaleX, 0.55 * scaleY, 4, 8),
-    mat(preset.pants),
-  );
-  legL.position.set(-0.11 * scaleX, -0.35 * scaleY, 0);
-  legL.castShadow = true;
-  hips.add(legL);
-  const legR = legL.clone();
-  legR.position.x = 0.11 * scaleX;
-  hips.add(legR);
-  const shoeL = new THREE.Mesh(
-    new THREE.BoxGeometry(0.12 * scaleX, 0.06, 0.22),
-    mat(preset.shoes, 0.5),
-  );
-  shoeL.position.set(-0.11 * scaleX, -0.66 * scaleY, 0.03);
-  shoeL.castShadow = true;
-  hips.add(shoeL);
-  const shoeR = shoeL.clone();
-  shoeR.position.x = 0.11 * scaleX;
-  hips.add(shoeR);
+  // ---------- legs ----------
 
-  // Torso (rotates for swing)
+  function buildLeg(side) {
+    const grp = new THREE.Group();
+    grp.position.set(hipHalf * side * 0.65, 0, 0);
+
+    // Thigh
+    const thighGeo = roundedBox(headSize * 0.55, upperLeg, headSize * 0.55, 0.05);
+    const thigh = new THREE.Mesh(thighGeo, mat(preset.pants, 0.85));
+    thigh.position.y = -upperLeg / 2;
+    thigh.castShadow = true;
+    grp.add(thigh);
+
+    // Knee joint (sub-group rotates at the knee)
+    const knee = new THREE.Group();
+    knee.position.y = -upperLeg;
+    grp.add(knee);
+
+    const shinGeo = roundedBox(headSize * 0.48, lowerLeg, headSize * 0.48, 0.04);
+    const shin = new THREE.Mesh(shinGeo, mat(preset.pants, 0.85));
+    shin.position.y = -lowerLeg / 2;
+    shin.castShadow = true;
+    knee.add(shin);
+
+    // Foot
+    const foot = new THREE.Group();
+    foot.position.y = -lowerLeg;
+    knee.add(foot);
+
+    const shoeGeo = roundedBox(headSize * 0.55, headSize * 0.30, headSize * 1.05, 0.04);
+    const shoe = new THREE.Mesh(shoeGeo, mat(preset.shoes, 0.4));
+    shoe.position.set(0, -headSize * 0.10, headSize * 0.25);
+    shoe.castShadow = true;
+    foot.add(shoe);
+
+    const sole = new THREE.Mesh(
+      roundedBox(headSize * 0.55, headSize * 0.08, headSize * 1.05, 0.02),
+      mat(preset.shoeSole, 0.6),
+    );
+    sole.position.set(0, -headSize * 0.24, headSize * 0.25);
+    sole.castShadow = false;
+    foot.add(sole);
+
+    return { grp, knee, foot };
+  }
+  const legL = buildLeg(-1);
+  const legR = buildLeg(1);
+  hips.add(legL.grp);
+  hips.add(legR.grp);
+
+  // ---------- torso ----------
+
+  // Pelvis + belt
+  const pelvis = new THREE.Mesh(
+    roundedBox(hipHalf * 2.0, headSize * 0.55, headSize * 1.0 * preset.chest, 0.06),
+    mat(preset.pants, 0.85),
+  );
+  pelvis.position.y = headSize * 0.20;
+  pelvis.castShadow = true;
+  hips.add(pelvis);
+
+  const belt = new THREE.Mesh(
+    new THREE.BoxGeometry(hipHalf * 2.05, headSize * 0.08, headSize * 1.02 * preset.chest),
+    mat(preset.belt, 0.5),
+  );
+  belt.position.y = headSize * 0.42;
+  hips.add(belt);
+
+  // torsoPivot rotates the whole upper body (spine twist for swing).
   const torsoPivot = new THREE.Group();
+  torsoPivot.position.y = headSize * 0.45;
   hips.add(torsoPivot);
 
-  const torso = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.22 * scaleX, 0.45 * scaleY, 4, 8),
-    mat(preset.shirt),
+  // Chest
+  const chestGeo = roundedBox(
+    shoulderHalf * 1.9,
+    torsoLen * 0.75,
+    headSize * 1.05 * preset.chest,
+    0.08,
   );
-  torso.position.y = 0.30 * scaleY;
-  torso.castShadow = true;
-  torsoPivot.add(torso);
+  const chest = new THREE.Mesh(chestGeo, mat(preset.shirt, 0.75));
+  chest.position.y = torsoLen * 0.35;
+  chest.castShadow = true;
+  torsoPivot.add(chest);
 
-  // Neck + head
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.13 * scaleX, 20, 16),
+  // Collar trim
+  const collar = new THREE.Mesh(
+    new THREE.TorusGeometry(headSize * 0.42, headSize * 0.06, 6, 18, Math.PI),
+    mat(preset.shirtCollar, 0.7),
+  );
+  collar.rotation.x = Math.PI / 2;
+  collar.rotation.z = 0;
+  collar.position.set(0, torsoLen * 0.72, headSize * 0.20);
+  torsoPivot.add(collar);
+
+  // ---------- neck + head ----------
+
+  const neck = new THREE.Mesh(
+    new THREE.CylinderGeometry(headSize * 0.22, headSize * 0.27, headSize * 0.35, 12),
     mat(preset.skin, 0.6),
   );
-  head.position.y = 0.72 * scaleY;
+  neck.position.y = torsoLen * 0.85;
+  neck.castShadow = true;
+  torsoPivot.add(neck);
+
+  const headGroup = new THREE.Group();
+  headGroup.position.y = torsoLen * 0.85 + headSize * 0.75;
+  torsoPivot.add(headGroup);
+
+  // Head is a slightly elongated sphere with a procedural face texture.
+  const headGeo = new THREE.SphereGeometry(headSize * 0.55, 24, 20);
+  // Squish into a more humanoid shape
+  headGeo.scale(0.92, 1.05, 0.95);
+  const faceMat = new THREE.MeshStandardMaterial({
+    map: makeFaceTexture(preset),
+    roughness: 0.55,
+    metalness: 0.0,
+  });
+  const head = new THREE.Mesh(headGeo, faceMat);
   head.castShadow = true;
-  torsoPivot.add(head);
+  headGroup.add(head);
+
+  // Jaw shadow box (subtle) — adds silhouette
+  const jaw = new THREE.Mesh(
+    roundedBox(headSize * 0.85, headSize * 0.35, headSize * 0.85, 0.06),
+    mat(preset.skin, 0.6),
+  );
+  jaw.position.set(0, -headSize * 0.32, 0);
+  headGroup.add(jaw);
+
+  // Ears
+  for (const side of [-1, 1]) {
+    const ear = new THREE.Mesh(
+      new THREE.SphereGeometry(headSize * 0.12, 10, 8),
+      mat(preset.skin, 0.6),
+    );
+    ear.position.set(headSize * 0.50 * side, headSize * 0.05, 0);
+    ear.scale.set(0.55, 1, 0.7);
+    headGroup.add(ear);
+  }
 
   // Hat
-  if (preset.cap === 'visor') {
-    const visor = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.135 * scaleX, 0.135 * scaleX, 0.05, 16, 1, true),
-      mat(preset.hat, 0.6),
+  if (preset.cap === 'cap' && preset.hat != null) {
+    const crown = new THREE.Mesh(
+      new THREE.SphereGeometry(headSize * 0.58, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+      mat(preset.hat, 0.7),
     );
-    visor.position.y = 0.80 * scaleY;
-    head.add(visor);
+    crown.position.y = headSize * 0.30;
+    crown.castShadow = true;
+    headGroup.add(crown);
+
     const brim = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.20 * scaleX, 0.20 * scaleX, 0.012, 24),
-      mat(preset.hat, 0.6),
+      new THREE.BoxGeometry(headSize * 1.15, headSize * 0.06, headSize * 0.55),
+      mat(preset.hat, 0.7),
     );
-    brim.position.set(0, 0.06 * scaleY, 0.06);
-    visor.add(brim);
-  } else {
-    const cap = new THREE.Mesh(
-      new THREE.SphereGeometry(0.14 * scaleX, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2),
-      mat(preset.hat, 0.6),
-    );
-    cap.position.y = 0.78 * scaleY;
-    head.add(cap);
-    const brim = new THREE.Mesh(
-      new THREE.BoxGeometry(0.28 * scaleX, 0.012, 0.10),
-      mat(preset.hat, 0.6),
-    );
-    brim.position.set(0, 0.78 * scaleY, 0.13);
-    head.add(brim);
+    brim.position.set(0, headSize * 0.32, headSize * 0.55);
+    brim.castShadow = true;
+    headGroup.add(brim);
+
+    if (preset.hatLogo != null) {
+      const logo = new THREE.Mesh(
+        new THREE.PlaneGeometry(headSize * 0.18, headSize * 0.10),
+        new THREE.MeshStandardMaterial({ color: preset.hatLogo, roughness: 0.6 }),
+      );
+      logo.position.set(0, headSize * 0.42, headSize * 0.58);
+      logo.rotation.x = -0.1;
+      headGroup.add(logo);
+    }
   }
 
-  // Beard
-  if (preset.beard) {
-    const beard = new THREE.Mesh(
-      new THREE.SphereGeometry(0.10 * scaleX, 14, 10, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
-      mat(preset.beard, 0.9),
-    );
-    beard.position.set(0, 0.69 * scaleY, 0.02);
-    beard.scale.set(1, 0.7, 0.6);
-    torsoPivot.add(beard);
-  }
+  // ---------- shoulders + arms ----------
 
-  // Shoulders -> arms. Both arms hang from a shoulder pivot we'll rotate together.
+  // armsPivot rotates both arms together (swing motion). Each arm has its
+  // own shoulder + elbow joint so the forearm bends naturally. Place the
+  // shoulders right at the top of the chest so arms hang OUTSIDE the torso.
   const armsPivot = new THREE.Group();
-  armsPivot.position.set(0, 0.55 * scaleY, 0);
+  armsPivot.position.y = torsoLen * 0.70;
   torsoPivot.add(armsPivot);
 
   function buildArm(side) {
-    const grp = new THREE.Group();
-    grp.position.set(0.22 * scaleX * side, 0, 0);
-    const upper = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.055 * scaleX, 0.28 * scaleY, 4, 8),
-      mat(preset.shirt),
+    const shoulder = new THREE.Group();
+    shoulder.position.set(shoulderHalf * 1.05 * side, 0, 0);
+    armsPivot.add(shoulder);
+
+    // Shoulder cap
+    const shoulderCap = new THREE.Mesh(
+      new THREE.SphereGeometry(headSize * 0.32, 14, 10),
+      mat(preset.shirt, 0.75),
     );
-    upper.position.y = -0.16 * scaleY;
+    shoulderCap.castShadow = true;
+    shoulder.add(shoulderCap);
+
+    // Upper arm
+    const upperGeo = roundedBox(headSize * 0.30, upperArm, headSize * 0.32, 0.04);
+    const upper = new THREE.Mesh(upperGeo, mat(preset.shirt, 0.75));
+    upper.position.y = -upperArm / 2;
     upper.castShadow = true;
-    grp.add(upper);
-    const fore = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.05 * scaleX, 0.28 * scaleY, 4, 8),
-      mat(preset.skin),
-    );
-    fore.position.y = -0.45 * scaleY;
+    shoulder.add(upper);
+
+    // Elbow joint
+    const elbow = new THREE.Group();
+    elbow.position.y = -upperArm;
+    shoulder.add(elbow);
+
+    // Forearm (skin)
+    const foreGeo = roundedBox(headSize * 0.24, foreArm, headSize * 0.26, 0.04);
+    const fore = new THREE.Mesh(foreGeo, mat(preset.skin, 0.6));
+    fore.position.y = -foreArm / 2;
     fore.castShadow = true;
-    grp.add(fore);
-    return grp;
+    elbow.add(fore);
+
+    // Hand
+    const hand = new THREE.Group();
+    hand.position.y = -foreArm;
+    elbow.add(hand);
+
+    const palm = new THREE.Mesh(
+      roundedBox(headSize * 0.32, headSize * 0.20, headSize * 0.16, 0.03),
+      mat(preset.skin, 0.6),
+    );
+    palm.castShadow = true;
+    hand.add(palm);
+
+    return { shoulder, elbow, hand };
   }
   const armL = buildArm(-1);
   const armR = buildArm(1);
-  armsPivot.add(armL);
-  armsPivot.add(armR);
 
-  // Hands grip point (between forearms, slightly forward)
+  // Hands grip the club between them. Grip pivot lives at the wrist-fork.
   const gripPivot = new THREE.Group();
-  gripPivot.position.set(0, -0.60 * scaleY, 0.32);
+  gripPivot.position.set(0, -upperArm * 0.95 - foreArm * 0.95, foreArm * 0.65);
   armsPivot.add(gripPivot);
 
   const club = buildClub();
-  club.scale.setScalar(scaleY);
   gripPivot.add(club);
 
-  return { root, hips, torsoPivot, armsPivot, gripPivot, club, scaleY };
+  return {
+    root,
+    hips,
+    torsoPivot,
+    armsPivot,
+    armL, armR,
+    legL, legR,
+    gripPivot,
+    club,
+    headGroup,
+    scaleY: H / 1.8,
+    H, headSize,
+  };
 }
 
-// Pose targets per swing state (relative to neutral). Right-handed golfer; the
-// model addresses ball in +Z, swings around Y, with club starting low (+Z, -Y).
+// ---------- rounded-box helper (chamfered edges look softer than raw cubes) ----------
+
+function roundedBox(w, h, d, radius = 0.05) {
+  // BoxGeometry with tweaked vertices — cheap chamfer via barycentric squish.
+  // For simplicity we just return a slightly subdivided BoxGeometry and let the
+  // smooth shading + lighting handle the rest. (Real chamfer would be heavier.)
+  const geo = new THREE.BoxGeometry(w, h, d, 2, 2, 2);
+  return geo;
+}
+
+// ---------- pose targets ----------
+
+// Right-handed golfer. The ball sits to the model's right (slightly +X in local
+// space) at ~mid-shin height. We rotate around Y for spine twist, X for forward
+// lean. Knees / elbows get a slight per-state bend.
+
 const POSES = {
-  idle:      { torsoY: 0, torsoX: 0, armsX: 0.05, gripX: 0,    clubRot: 0 },
-  address:   { torsoY: 0.05, torsoX: 0.25, armsX: 0.55, gripX: 0, clubRot: 0 },
-  backswing: { torsoY: -1.55, torsoX: 0.15, armsX: -1.2, gripX: 0, clubRot: -1.6 },
-  downswing: { torsoY: 0.20, torsoX: 0.20, armsX: 0.70, gripX: 0, clubRot: 0.15 },
-  follow:    { torsoY: 1.65, torsoX: 0.05, armsX: 1.30, gripX: 0, clubRot: 1.4 },
-  reset:     { torsoY: 0, torsoX: 0, armsX: 0.05, gripX: 0,    clubRot: 0 },
+  idle: {
+    torsoY: 0,        torsoX: 0,
+    armsX: 0.08,      armsY: 0,
+    elbowL: 0.25,     elbowR: 0.25,
+    gripX: 0,         clubRot: 0,
+    kneeL: 0.10,      kneeR: 0.10,
+    headX: 0,         headY: 0,
+  },
+  address: {
+    torsoY: 0.08,     torsoX: 0.42,
+    armsX: 0.95,      armsY: 0.05,
+    elbowL: 0.15,     elbowR: 0.15,
+    gripX: 0,         clubRot: 0,
+    kneeL: 0.25,      kneeR: 0.25,
+    headX: 0.30,      headY: 0.05,
+  },
+  backswing: {
+    torsoY: -1.50,    torsoX: 0.20,
+    armsX: -1.30,     armsY: 0.25,
+    elbowL: 0.05,     elbowR: 1.40,
+    gripX: 0,         clubRot: -1.80,
+    kneeL: 0.18,      kneeR: 0.30,
+    headX: 0.25,      headY: -0.30,
+  },
+  downswing: {
+    torsoY: 0.25,     torsoX: 0.30,
+    armsX: 0.95,      armsY: 0.10,
+    elbowL: 0.10,     elbowR: 0.30,
+    gripX: 0,         clubRot: 0.20,
+    kneeL: 0.22,      kneeR: 0.22,
+    headX: 0.35,      headY: 0.0,
+  },
+  follow: {
+    torsoY: 1.65,     torsoX: 0.05,
+    armsX: 1.40,      armsY: -0.10,
+    elbowL: 1.50,     elbowR: 0.20,
+    gripX: 0,         clubRot: 1.60,
+    kneeL: 0.10,      kneeR: 0.05,
+    headX: -0.05,     headY: 0.30,
+  },
+  reset: {
+    torsoY: 0,        torsoX: 0,
+    armsX: 0.08,      armsY: 0,
+    elbowL: 0.25,     elbowR: 0.25,
+    gripX: 0,         clubRot: 0,
+    kneeL: 0.10,      kneeR: 0.10,
+    headX: 0,         headY: 0,
+  },
 };
 
-// Per-state duration (seconds) and easing.
 const TIMING = {
   idle:      { dur: Infinity, ease: 'linear' },
-  address:   { dur: 0.4, ease: 'easeOut' },
-  backswing: { dur: 0.7, ease: 'easeInOut' },
+  address:   { dur: 0.5, ease: 'easeOut' },
+  backswing: { dur: 0.75, ease: 'easeInOut' },
   downswing: { dur: 0.22, ease: 'easeIn' },
-  follow:    { dur: 0.45, ease: 'easeOut' },
-  reset:     { dur: 0.6, ease: 'easeInOut' },
+  follow:    { dur: 0.5, ease: 'easeOut' },
+  reset:     { dur: 0.7, ease: 'easeInOut' },
 };
 
 function ease(t, kind) {
@@ -225,19 +562,41 @@ function applyPose(parts, pose) {
   parts.torsoPivot.rotation.y = pose.torsoY;
   parts.torsoPivot.rotation.x = pose.torsoX;
   parts.armsPivot.rotation.x = pose.armsX;
+  parts.armsPivot.rotation.y = pose.armsY;
+  parts.armL.elbow.rotation.x = pose.elbowL;
+  parts.armR.elbow.rotation.x = pose.elbowR;
   parts.gripPivot.rotation.x = pose.gripX;
   parts.club.rotation.x = pose.clubRot;
+  parts.legL.knee.rotation.x = pose.kneeL;
+  parts.legR.knee.rotation.x = pose.kneeR;
+  parts.headGroup.rotation.x = pose.headX * 0.4;
+  parts.headGroup.rotation.y = pose.headY;
+}
+
+function readPose(parts) {
+  return {
+    torsoY: parts.torsoPivot.rotation.y,
+    torsoX: parts.torsoPivot.rotation.x,
+    armsX: parts.armsPivot.rotation.x,
+    armsY: parts.armsPivot.rotation.y,
+    elbowL: parts.armL.elbow.rotation.x,
+    elbowR: parts.armR.elbow.rotation.x,
+    gripX: parts.gripPivot.rotation.x,
+    clubRot: parts.club.rotation.x,
+    kneeL: parts.legL.knee.rotation.x,
+    kneeR: parts.legR.knee.rotation.x,
+    headX: parts.headGroup.rotation.x / 0.4,
+    headY: parts.headGroup.rotation.y,
+  };
 }
 
 function lerpPose(from, to, t) {
-  return {
-    torsoY: lerp(from.torsoY, to.torsoY, t),
-    torsoX: lerp(from.torsoX, to.torsoX, t),
-    armsX:  lerp(from.armsX,  to.armsX,  t),
-    gripX:  lerp(from.gripX,  to.gripX,  t),
-    clubRot: lerp(from.clubRot, to.clubRot, t),
-  };
+  const out = {};
+  for (const k of Object.keys(to)) out[k] = lerp(from[k] ?? 0, to[k], t);
+  return out;
 }
+
+// ---------- exports ----------
 
 export function createGolfer({ character = 'tiger' } = {}) {
   const preset = PRESETS[character] ?? PRESETS.tiger;
@@ -249,20 +608,13 @@ export function createGolfer({ character = 'tiger' } = {}) {
   let elapsed = 0;
   let duration = TIMING.idle.dur;
   let easing = TIMING.idle.ease;
-  let idleClock = 0;
+  let idleClock = Math.random() * 4;
 
   applyPose(parts, fromPose);
 
   function setSwingState(next) {
     if (!STATES.includes(next)) return;
-    // capture current visual pose as "from"
-    fromPose = {
-      torsoY: parts.torsoPivot.rotation.y,
-      torsoX: parts.torsoPivot.rotation.x,
-      armsX: parts.armsPivot.rotation.x,
-      gripX: parts.gripPivot.rotation.x,
-      clubRot: parts.club.rotation.x,
-    };
+    fromPose = readPose(parts);
     toPose = POSES[next];
     duration = TIMING[next].dur;
     easing = TIMING[next].ease;
@@ -273,13 +625,18 @@ export function createGolfer({ character = 'tiger' } = {}) {
   function update(dt) {
     if (!isFinite(dt) || dt <= 0) return;
     if (state === 'idle') {
-      // light sway
       idleClock += dt;
       const sway = Math.sin(idleClock * 1.4) * 0.04;
-      const bob = Math.sin(idleClock * 2.0) * 0.01;
+      const bob = Math.sin(idleClock * 2.0) * 0.012;
+      const breathe = Math.sin(idleClock * 1.6) * 0.008;
       parts.torsoPivot.rotation.y = sway;
-      parts.torsoPivot.rotation.x = 0.02 + bob;
-      parts.armsPivot.rotation.x = 0.05 + Math.sin(idleClock * 1.4) * 0.02;
+      parts.torsoPivot.rotation.x = 0.03 + bob;
+      parts.armsPivot.rotation.x = 0.08 + Math.sin(idleClock * 1.4) * 0.025;
+      parts.headGroup.rotation.y = Math.sin(idleClock * 0.7) * 0.10;
+      parts.headGroup.position.y = parts.headGroup.userData.baseY ?? 0;
+      // Slight weight shift on the legs
+      parts.legL.knee.rotation.x = 0.10 + breathe;
+      parts.legR.knee.rotation.x = 0.10 - breathe;
       return;
     }
     elapsed += dt;

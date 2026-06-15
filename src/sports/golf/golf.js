@@ -369,6 +369,7 @@ export function mountGolf(host, configOrOnExit) {
     physics.ball.angularVelocity.set(0, 0, 0);
     physics.ball.position.set(teeWorld.x, teeWorld.y + physics.BALL_RADIUS, teeWorld.z);
     physics.ball.quaternion.set(0, 0, 0, 1);
+    physics.markSafePos?.(teeWorld.x, teeWorld.y + physics.BALL_RADIUS, teeWorld.z);
     physics.ball.wakeUp();
   }
 
