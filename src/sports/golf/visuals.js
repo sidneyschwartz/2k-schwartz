@@ -45,9 +45,14 @@ function findOrAddSunLight(scene, sunDir) {
     if (!sunLight && o.isDirectionalLight) sunLight = o;
   });
   if (!sunLight) {
-    sunLight = new THREE.DirectionalLight(0xfff2dd, 2.6);
+    sunLight = new THREE.DirectionalLight(0xfff2dd, 2.0);
     scene.add(sunLight);
-    const ambient = new THREE.HemisphereLight(0xbfd8ff, 0x3a5530, 0.6);
+  }
+  // Always ensure a strong-enough ambient fill so foreground ground doesn't go pitch black.
+  let hasHemi = false;
+  scene.traverse((o) => { if (o.isHemisphereLight) hasHemi = true; });
+  if (!hasHemi) {
+    const ambient = new THREE.HemisphereLight(0xcfe2ff, 0x4a6a40, 1.2);
     scene.add(ambient);
   }
   sunLight.position.copy(sunDir).multiplyScalar(SUN_DISTANCE);
@@ -83,8 +88,9 @@ export function applyVisuals(scene, renderer, camera = null) {
   const sunDir = sun.clone().normalize();
   const sunLight = findOrAddSunLight(scene, sunDir);
 
-  // Mild fog for distance haze; matches sky horizon.
-  scene.fog = new THREE.Fog(0xbcd4e6, 250, 900);
+  // Mild fog for distance haze; matches sky horizon. Pushed back so a 145m par-3
+  // doesn't disappear into white.
+  scene.fog = new THREE.Fog(0xbcd4e6, 400, 1400);
   if (!scene.background) scene.background = new THREE.Color(0x87b6e0);
 
   // Post-processing.
@@ -98,7 +104,8 @@ export function applyVisuals(scene, renderer, camera = null) {
     composer.setSize(size.x, size.y);
     composer.addPass(new RenderPass(scene, camera));
 
-    bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.3, 0.6, 0.85);
+    // Bloom kept very gentle so it doesn't wash out the horizon line.
+    bloomPass = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.12, 0.7, 0.92);
     composer.addPass(bloomPass);
 
     smaaPass = new SMAAPass(size.x * renderer.getPixelRatio(), size.y * renderer.getPixelRatio());

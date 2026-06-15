@@ -51,6 +51,33 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
   const hazards = []; // { type: 'water'|'sand', shape, x, z, r?, w?, d? }
   const cupMeshes = [];
 
+  // ---- BASE ROUGH GROUND ----
+  // Without this, anything outside an explicit region renders as bare sky.
+  // Big plane stretching from well behind the tee to well past the pin.
+  const baseSize = 1200;
+  const dx = (holeData.tee?.x ?? 0) + (holeData.pin?.x ?? 0);
+  const dz = (holeData.tee?.z ?? 0) + (holeData.pin?.z ?? 0);
+  const baseCenter = { x: dx * 0.5, z: dz * 0.5 };
+  const baseGeo = new THREE.PlaneGeometry(baseSize, baseSize, 1, 1);
+  let baseMat = null;
+  if (applyMaterial) {
+    try {
+      const dummy = new THREE.Mesh();
+      const ret = applyMaterial('rough', dummy, { shape: 'fill' });
+      baseMat = ret instanceof THREE.Material ? ret : dummy.material;
+    } catch {}
+  }
+  if (!baseMat) baseMat = new THREE.MeshStandardMaterial({ color: FALLBACK_COLORS.rough, roughness: 0.95 });
+  const base = new THREE.Mesh(baseGeo, baseMat);
+  base.rotation.x = -Math.PI / 2;
+  base.position.set(baseCenter.x, -0.005, baseCenter.z);
+  // receiveShadow OFF on the base — the directional light's shadow camera frustum
+  // (±160 m from origin) is much smaller than the base plane (±600 m), so the
+  // foreground samples outside the shadow map and is treated as fully shadowed.
+  base.receiveShadow = false;
+  group.add(base);
+  ownedMeshes.push(base);
+
   function makeMaterial(surfaceType, opts = {}) {
     if (applyMaterial) {
       try {

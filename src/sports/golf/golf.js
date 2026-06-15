@@ -152,6 +152,49 @@ function makeShotTracer(scene) {
   return { setFrames, hide, update, dispose };
 }
 
+// ---------- on-screen debug overlay ----------
+// Surface what the engine sees (camera, ball, lie, scene size) so a blue screen
+// is diagnosable without opening DevTools. Toggle off by appending `?debug=0`.
+function mountDebugOverlay(host) {
+  const el = document.createElement('pre');
+  el.style.cssText = `
+    position: fixed; top: 56px; left: 12px; z-index: 30;
+    background: #0009; color: #6f6; font: 11px/1.3 ui-monospace, Menlo, monospace;
+    padding: 8px 10px; border-radius: 6px; pointer-events: none;
+    max-width: 360px; white-space: pre-wrap; border: 1px solid #4f4a;
+  `;
+  el.textContent = 'debug overlay loading…';
+  host.appendChild(el);
+  let frames = 0;
+  let lastT = performance.now();
+  let fps = 0;
+  return {
+    tick({ scene, camera, ball, pinWorld, holeData, lie, compositorActive }) {
+      frames++;
+      const now = performance.now();
+      if (now - lastT > 500) {
+        fps = Math.round((frames * 1000) / (now - lastT));
+        frames = 0; lastT = now;
+      }
+      const cp = camera.position;
+      const bp = ball.position;
+      const childCount = scene.children?.length ?? 0;
+      el.textContent = [
+        `fps:        ${fps}`,
+        `compositor: ${compositorActive ? 'composer' : 'plain'}`,
+        `scene:      ${childCount} top-level objects`,
+        `hole:       #${holeData?.number ?? '?'} ${holeData?.name ?? ''} (par ${holeData?.par ?? '?'})`,
+        `lie:        ${lie ?? '-'}`,
+        `cam:        x=${cp.x.toFixed(1)} y=${cp.y.toFixed(1)} z=${cp.z.toFixed(1)}`,
+        `ball:       x=${bp.x.toFixed(1)} y=${bp.y.toFixed(2)} z=${bp.z.toFixed(1)}`,
+        `pin:        x=${pinWorld?.x?.toFixed(1) ?? '-'} z=${pinWorld?.z?.toFixed(1) ?? '-'}`,
+        `cam→pin dz: ${(pinWorld ? (pinWorld.z - cp.z) : 0).toFixed(1)}`,
+      ].join('\n');
+    },
+    dispose() { try { host.removeChild(el); } catch {} },
+  };
+}
+
 // Accepts either:
 //   mountGolf(host, onExitFn)                       — legacy single-player
 //   mountGolf(host, { mode, code, character, onExit }) — lobby config
@@ -165,6 +208,11 @@ export function mountGolf(host, configOrOnExit) {
 
   host.innerHTML = '';
   host.style.position = 'relative';
+
+  // Debug overlay enabled by default during the blue-screen hunt. Press `~` to toggle,
+  // or strip `?debug=0` from the URL once we're shipped.
+  const debugOn = new URLSearchParams(location.search).get('debug') !== '0';
+  const debugOverlay = debugOn ? mountDebugOverlay(host) : null;
 
   // ---- Scene + visuals ----
   const sceneObj = createScene(host);
@@ -1187,7 +1235,30 @@ export function mountGolf(host, configOrOnExit) {
       });
     }
 
-    if (visuals?.composer) visuals.composer.render(); else renderer.render(scene, camera);
+    // Defensive render: try composer, fall back to plain render on any error so we
+    // never end up with a blue screen from a broken post-FX pipeline.
+    try {
+      if (visuals?.composer) visuals.composer.render();
+      else renderer.render(scene, camera);
+    } catch (err) {
+      if (!tick._renderErrorLogged) {
+        console.error('[golf] composer.render failed, falling back to renderer.render:', err);
+        tick._renderErrorLogged = true;
+      }
+      try { renderer.render(scene, camera); } catch (err2) {
+        if (!tick._fallbackErrorLogged) {
+          console.error('[golf] renderer.render also failed:', err2);
+          tick._fallbackErrorLogged = true;
+        }
+      }
+    }
+
+    // Debug overlay refresh (?debug=1).
+    if (debugOverlay) debugOverlay.tick({
+      scene, camera, ball: physics.ball,
+      pinWorld, holeData: game.holeData, lie: game.lie,
+      compositorActive: !!visuals?.composer,
+    });
   }
   rafId = requestAnimationFrame(tick);
 
