@@ -41,7 +41,7 @@ export const clubs = [
   {
     name: 'Putter',
     loft: deg(4),
-    maxPower: 6,         // very low, ground game
+    maxPower: 12,        // ground-roll speed; engine treats putter shots as flat (isPutt flag)
     forgiveness: 0.9,
     sidespinScale: 0.1,
     backspin: 0,

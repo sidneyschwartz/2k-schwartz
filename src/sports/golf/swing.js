@@ -119,6 +119,7 @@ export function createSwingController({ onSwingStart, onShot } = {}) {
       rawAccuracyError: accuracy,
       aimYaw: state.aimYaw,
       stance: { ...state.stance },
+      isPutt: !!state.putting,
     });
   }
 
