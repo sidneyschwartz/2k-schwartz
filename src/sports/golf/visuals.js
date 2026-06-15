@@ -61,18 +61,23 @@ function findOrAddSunLight(scene, sunDir) {
   sunLight.target.updateMatrixWorld();
 
   sunLight.castShadow = true;
-  sunLight.shadow.mapSize.set(2048, 2048);
+  // Bigger shadow map for crisper edges. quality.js can dial this down for Low.
+  sunLight.shadow.mapSize.set(4096, 4096);
   const cam = sunLight.shadow.camera;
-  // Frustum sized for a Phase 1 hole (~250m long, ~80m wide).
-  cam.left = -160;
-  cam.right = 160;
-  cam.top = 160;
-  cam.bottom = -160;
+  // Tighter frustum focused around the player area gives much sharper shadows
+  // than the previous ±160 spread. Engine should move the light target to the
+  // ball if it wants long-range shadows on the par-5; we keep this for the
+  // near-camera character + tee box where it matters most.
+  cam.left = -80;
+  cam.right = 80;
+  cam.top = 80;
+  cam.bottom = -80;
   cam.near = 1;
-  cam.far = 1200;
+  cam.far = 800;
   cam.updateProjectionMatrix();
-  sunLight.shadow.bias = -0.0003;
-  sunLight.shadow.normalBias = 0.04;
+  sunLight.shadow.bias = -0.0002;
+  sunLight.shadow.normalBias = 0.03;
+  sunLight.shadow.radius = 2; // soft edges
   return sunLight;
 }
 

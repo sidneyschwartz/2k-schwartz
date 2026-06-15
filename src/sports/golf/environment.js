@@ -143,6 +143,67 @@ const FOLIAGE_TINTS = [
   new THREE.Color(0x4c8a3c), new THREE.Color(0x356b2e), new THREE.Color(0x2d6b40),
 ];
 
+// ---------- rocks ----------
+
+// Small instanced rocks scattered in the rough outside the play corridor. Adds
+// terrain texture and breaks up the empty rough.
+function scatterRocks(scene, holeData) {
+  const { minX, maxX, minZ, maxZ } = holeBounds(holeData);
+  const area = (maxX - minX) * (maxZ - minZ);
+  const target = Math.min(80, Math.max(20, Math.floor(area * 0.0015)));
+
+  const safe = (x, z) => {
+    for (const r of holeData.regions ?? []) {
+      if (r.type === 'rough' && r.shape === 'fill') continue;
+      if (regionContains(r, x, z)) return false;
+    }
+    // keep out of the immediate tee corridor
+    if (Math.abs(x - holeData.tee.x) < 6 && z < holeData.tee.z + 20 && z > holeData.tee.z - 5) return false;
+    return true;
+  };
+
+  const positions = [];
+  let attempts = 0;
+  while (positions.length < target && attempts < target * 8) {
+    attempts++;
+    const x = minX + Math.random() * (maxX - minX);
+    const z = minZ + Math.random() * (maxZ - minZ);
+    if (!safe(x, z)) continue;
+    positions.push({ x, z });
+  }
+  if (!positions.length) return null;
+
+  const geo = new THREE.IcosahedronGeometry(0.45, 0);
+  // Jitter vertices a little for non-uniform rock shapes.
+  const arr = geo.attributes.position.array;
+  for (let i = 0; i < arr.length; i++) arr[i] *= 0.85 + Math.random() * 0.3;
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x8a8076,
+    roughness: 0.95,
+    metalness: 0.0,
+    flatShading: true,
+  });
+
+  const inst = new THREE.InstancedMesh(geo, mat, positions.length);
+  inst.castShadow = true;
+  inst.receiveShadow = true;
+  inst.name = 'rocks';
+  const dummy = new THREE.Object3D();
+  positions.forEach((p, i) => {
+    const s = 0.35 + Math.random() * 1.4;
+    dummy.position.set(p.x, s * 0.3, p.z);
+    dummy.rotation.set(Math.random() * 0.4, Math.random() * Math.PI * 2, Math.random() * 0.4);
+    dummy.scale.set(s, s * (0.6 + Math.random() * 0.4), s);
+    dummy.updateMatrix();
+    inst.setMatrixAt(i, dummy.matrix);
+  });
+  inst.instanceMatrix.needsUpdate = true;
+  scene.add(inst);
+  return inst;
+}
+
 function scatterTrees(scene, holeData, density = 0.012) {
   const { minX, maxX, minZ, maxZ } = holeBounds(holeData);
   const area = (maxX - minX) * (maxZ - minZ);
@@ -280,6 +341,7 @@ function addTeeSign(scene, holeData) {
 // each frame so the grass patch follows the ball and the wind animates.
 export function decorateHole(scene, holeData, opts = {}) {
   const trees = scatterTrees(scene, holeData);
+  const rocks = scatterRocks(scene, holeData);
   const sign = addTeeSign(scene, holeData);
 
   // Instanced grass patch around the ball. Uses InstancedMesh — one draw call
@@ -340,6 +402,7 @@ export function decorateHole(scene, holeData, opts = {}) {
   function dispose() {
     if (grass) { scene.remove(grass.mesh); try { grass.dispose(); } catch {} }
     if (sign?.parent) scene.remove(sign);
+    if (rocks?.parent) scene.remove(rocks);
     if (trees?.meshes) for (const m of trees.meshes) scene.remove(m);
     else {
       if (trees?.trunks) scene.remove(trees.trunks);
@@ -348,7 +411,7 @@ export function decorateHole(scene, holeData, opts = {}) {
   }
 
   return {
-    trees, sign, grass,
+    trees, rocks, sign, grass,
     tick,
     setGrassDensity,
     setTreeDensity,
