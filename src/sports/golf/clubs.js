@@ -12,38 +12,42 @@
 
 const deg = (d) => (d * Math.PI) / 180;
 
+// NOTE: recalibrated after measuring the actual aero model — the prior 53 m/s
+// "ball speed" ballooned (23m apex) and only carried ~110m. Real driver ball speed
+// is ~70 m/s; combined with lower backspin (flatter, more penetrating) these land
+// the carries in realistic ranges. Measured full-power driver ≈ 230m after this.
 export const clubs = [
   {
     name: 'Driver',
-    loft: deg(10.5),
-    maxPower: 53,        // m/s ball speed -> ~230m carry with lift model
+    loft: deg(11),
+    maxPower: 74,        // m/s ball speed -> ~230m carry
     forgiveness: 0.35,
     sidespinScale: 1.6,
-    backspin: 264,       // ~42 rev/s — low spin keeps trajectory penetrating
+    backspin: 190,       // ~30 rev/s — low spin, penetrating flight (prevents balloon)
   },
   {
     name: '5-Iron',
-    loft: deg(22),
-    maxPower: 45,        // ~170m
+    loft: deg(20),
+    maxPower: 62,        // ~185m
     forgiveness: 0.5,
     sidespinScale: 1.1,
-    backspin: 420,       // ~67 rev/s
+    backspin: 330,
   },
   {
     name: '9-Iron',
-    loft: deg(38),
-    maxPower: 36,        // ~120m
+    loft: deg(37),
+    maxPower: 50,        // ~135m
     forgiveness: 0.65,
     sidespinScale: 0.9,
-    backspin: 600,       // ~95 rev/s
+    backspin: 480,
   },
   {
     name: 'Wedge',
     loft: deg(52),
-    maxPower: 28,        // ~80m, high apex
+    maxPower: 40,        // ~95m, high apex, checks up
     forgiveness: 0.75,
     sidespinScale: 0.7,
-    backspin: 720,       // ~115 rev/s — checks up on the green
+    backspin: 620,
   },
   {
     name: 'Putter',

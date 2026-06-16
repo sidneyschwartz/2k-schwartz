@@ -34,6 +34,10 @@ function liftCoefficient(spinRatio) {
   return 1 / (2 + 1 / s04);
 }
 
+// Lift calibration scalar. The bare Cl(S) curve over-lifts at our club params and
+// balloons shots; ~0.45 lands realistic 230m driver carries with a ~30m apex.
+const LIFT_SCALE = 0.45;
+
 // Spin decay time constant (seconds). Real golf balls lose ~10-15% of backspin
 // over a 6s flight; tau ~ 20s matches that with exp(-6/20) = 0.74 retention.
 const SPIN_DECAY_TAU = 20;
@@ -232,7 +236,10 @@ export function createPhysics() {
         const Cl = liftCoefficient(S);
         if (Cl > 0) {
           // Lift magnitude (N). Unit direction = cross / cmag. Combine into one scale.
-          const kl = (0.5 * rho * Cl * FRONTAL_AREA * relSpeed * relSpeed) / cmag;
+          // LIFT_SCALE calibration: the textbook Cl(S) curve produced ~2x gravity of
+          // lift at driver launch, which ballooned every shot (52m apex, 130m carry).
+          // Scaling to ~1x-weight lift gives a penetrating flight that carries ~230m.
+          const kl = (LIFT_SCALE * 0.5 * rho * Cl * FRONTAL_AREA * relSpeed * relSpeed) / cmag;
           _lift.set(cx * kl, cy * kl, cz * kl);
           ball.applyForce(_lift, ball.position);
         }
