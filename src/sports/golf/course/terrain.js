@@ -21,6 +21,7 @@
 //   water:    y=0.005 (visual only)
 
 import * as THREE from 'three';
+import { heightAt, greenBreakAt } from './heightfield.js';
 
 const Y = {
   rough: 0.000,
@@ -30,6 +31,52 @@ const Y = {
   green: 0.025,
   water: 0.005,
 };
+
+// Subdivision densities for displacement. Higher = smoother contour but more
+// triangles. ~1 segment per 4m is a good visual+perf compromise.
+const SEG_PER_METER = 1 / 4;
+function segments(extent) {
+  return Math.max(8, Math.min(64, Math.round(extent * SEG_PER_METER)));
+}
+
+// Apply the heightAt() displacement to a Three.js plane that has already been
+// rotated -90° about X (so the plane lies in world XZ). Position attribute is
+// pre-rotation, so geometry y-axis points "up" out of the plane — we set z
+// (geometry z) to the height delta, then computeVertexNormals.
+//
+// World-space coordinate of vertex i = (mesh.position.x + posAttr.getX(i),
+//                                       _,
+//                                       mesh.position.z - posAttr.getY(i))
+// because the -90° rotation maps geometry Y onto world -Z. We need world XZ to
+// look up heightAt().
+function displacePlane(geometry, mesh, holeData) {
+  const pos = geometry.attributes.position;
+  const mx = mesh.position.x;
+  const mz = mesh.position.z;
+  for (let i = 0; i < pos.count; i++) {
+    const gx = pos.getX(i);
+    const gy = pos.getY(i);
+    const worldX = mx + gx;
+    const worldZ = mz - gy; // rotation -90° X: world z = -geometry y
+    const dh = heightAt(worldX, worldZ, holeData);
+    pos.setZ(i, dh); // before rotation, geometry Z becomes world Y after rotation
+  }
+  pos.needsUpdate = true;
+  geometry.computeVertexNormals();
+}
+
+// Spline meshes are already in world XZ (no -90° rotation needed); displacement
+// is direct on the Y axis of each vertex.
+function displaceWorldPlane(geometry, holeData) {
+  const pos = geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    pos.setY(i, heightAt(x, z, holeData) + pos.getY(i));
+  }
+  pos.needsUpdate = true;
+  geometry.computeVertexNormals();
+}
 
 // Fallback colors used when no applyMaterial callback is supplied or the
 // art-agent materials throw.
@@ -58,7 +105,11 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
   const dx = (holeData.tee?.x ?? 0) + (holeData.pin?.x ?? 0);
   const dz = (holeData.tee?.z ?? 0) + (holeData.pin?.z ?? 0);
   const baseCenter = { x: dx * 0.5, z: dz * 0.5 };
-  const baseGeo = new THREE.PlaneGeometry(baseSize, baseSize, 1, 1);
+  // Subdivide the base so the per-hole fbm roll is visible in the foreground rough.
+  // ~1 segment per 8m for the big base plane; over a 1200x1200 area that's ~150x150
+  // verts ≈ 22k triangles. Fine on any GPU; the alternative is a flat sky-base.
+  const baseSeg = 150;
+  const baseGeo = new THREE.PlaneGeometry(baseSize, baseSize, baseSeg, baseSeg);
   let baseMat = null;
   if (applyMaterial) {
     try {
@@ -71,6 +122,7 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
   const base = new THREE.Mesh(baseGeo, baseMat);
   base.rotation.x = -Math.PI / 2;
   base.position.set(baseCenter.x, -0.005, baseCenter.z);
+  displacePlane(baseGeo, base, holeData);
   // receiveShadow OFF on the base — the directional light's shadow camera frustum
   // (±160 m from origin) is much smaller than the base plane (±600 m), so the
   // foreground samples outside the shadow map and is treated as fully shadowed.
@@ -112,32 +164,46 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
   }
 
   function rectMesh(region, surfaceType) {
-    const geo = new THREE.PlaneGeometry(region.w, region.d, 1, 1);
+    const segW = segments(region.w);
+    const segD = segments(region.d);
+    const geo = new THREE.PlaneGeometry(region.w, region.d, segW, segD);
     const mat = makeMaterial(surfaceType, region);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
     if (region.rotY) mesh.rotation.z = region.rotY;
     mesh.position.set(region.x, Y[surfaceType] ?? 0, region.z);
+    // Water is flat — don't ripple the lake surface with terrain bumps.
+    if (surfaceType !== 'water') displacePlane(geo, mesh, holeData);
     return mesh;
   }
 
-  function circleMesh(region, surfaceType, segments = 48) {
+  function circleMesh(region, surfaceType, segs = 48) {
     const r = region.r;
-    const geo = new THREE.CircleGeometry(r, segments);
+    // Add radial segments for displacement: extra rings between center + edge.
+    const rings = Math.max(4, Math.round(r * SEG_PER_METER * 2));
+    const geo = new THREE.CircleGeometry(r, segs, 0, Math.PI * 2);
+    // CircleGeometry only has a center vertex + edge ring by default — not enough
+    // for smooth contour. Build our own disc with rings instead.
+    const discGeo = buildDiscGeometry(r, segs, rings);
+    geo.dispose();
     const mat = makeMaterial(surfaceType, region);
-    const mesh = new THREE.Mesh(geo, mat);
+    const mesh = new THREE.Mesh(discGeo, mat);
     mesh.rotation.x = -Math.PI / 2;
-    const y = (Y[surfaceType] ?? 0) + (region.elevation ?? 0);
+    const y = (Y[surfaceType] ?? 0); // base elevation is applied via heightAt, not mesh.y
     mesh.position.set(region.x, y, region.z);
+    if (surfaceType !== 'water') displacePlane(discGeo, mesh, holeData);
     return mesh;
   }
 
-  function ringMesh(region, surfaceType, segments = 48) {
-    const geo = new THREE.RingGeometry(region.r, region.r2, segments);
+  function ringMesh(region, surfaceType, segs = 48) {
+    // Add radial rings between r and r2 so collar of rough catches the height field.
+    const rings = Math.max(2, Math.round((region.r2 - region.r) * SEG_PER_METER * 2));
+    const geo = buildRingGeometry(region.r, region.r2, segs, rings);
     const mat = makeMaterial(surfaceType, region);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(region.x, Y[surfaceType] ?? 0, region.z);
+    displacePlane(geo, mesh, holeData);
     return mesh;
   }
 
@@ -187,6 +253,8 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
     geo.setIndex(indices);
     geo.computeVertexNormals();
     const mat = makeMaterial(surfaceType, region);
+    // Spline verts are already in world XZ — apply terrain height directly on Y.
+    displaceWorldPlane(geo, holeData);
     return new THREE.Mesh(geo, mat);
   }
 
@@ -223,11 +291,10 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
   }
 
   // ---- Pin + cup ----
-  const pinWorld = new THREE.Vector3(holeData.pin.x, 0, holeData.pin.z);
-  // Find green elevation if any (so pin sits on top of the elevated green)
-  const greenRegion = holeData.regions.find((r) => r.type === 'green');
-  const greenElev = greenRegion?.elevation ?? 0;
-  pinWorld.y = greenElev;
+  // Pin sits on the actual contoured green surface, not just the region's base
+  // elevation — heightAt() composes plateau + contour + base roll.
+  const pinTerrainH = heightAt(holeData.pin.x, holeData.pin.z, holeData);
+  const pinWorld = new THREE.Vector3(holeData.pin.x, Y.green + pinTerrainH, holeData.pin.z);
 
   const pinGroup = new THREE.Group();
   const poleGeo = new THREE.CylinderGeometry(0.015, 0.015, 2.2, 8);
@@ -254,14 +321,15 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
   const cupMat = new THREE.MeshBasicMaterial({ color: 0x080808 });
   const cup = new THREE.Mesh(cupGeo, cupMat);
   cup.rotation.x = -Math.PI / 2;
-  cup.position.set(pinWorld.x, pinWorld.y + (Y.green) + 0.001, pinWorld.z);
+  cup.position.set(pinWorld.x, pinWorld.y + 0.001, pinWorld.z);
   group.add(cup);
   cupMeshes.push(cup);
 
-  // Tee world position lifted so the ball starts on top of the tee box
+  // Tee world position lifted so the ball starts on top of the contoured tee box
+  const teeTerrainH = heightAt(holeData.tee.x, holeData.tee.z, holeData);
   const teeWorld = new THREE.Vector3(
     holeData.tee.x,
-    Y.tee + 0.025,
+    Y.tee + teeTerrainH + 0.025,
     holeData.tee.z,
   );
 
@@ -275,14 +343,105 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
     physics.removeStaticBodies?.();
   }
 
+  // Expose green-break sampler so physics (and the bead-reader visual) can call
+  // it per step. Returns world XZ acceleration; physics gates application to
+  // ball-on-green via the existing setGreenSlope/ballOnGreen path or the new
+  // setGreenBreakField sampler the engine wires up.
+  function greenBreakAtXZ(x, z) {
+    return greenBreakAt(x, z, holeData);
+  }
+  function heightAtXZ(x, z) {
+    return heightAt(x, z, holeData);
+  }
+
   return {
     teeWorld,
     pinWorld,
     cupRadius: HOLE_CUP_RADIUS,
     group,
     hazards,
+    greenBreakAt: greenBreakAtXZ,
+    heightAt: heightAtXZ,
     dispose,
   };
+}
+
+const TAU = Math.PI * 2;
+
+// ---- Custom disc + ring builders with subdivided radial rings ----
+//
+// Three's CircleGeometry has 1 center vert + N edge verts → only one ring of
+// triangles, so heightAt() displacement is invisible. These builders emit
+// `rings+1` concentric rings of verts so the disc/ring picks up the height field.
+
+function buildDiscGeometry(radius, sides, rings) {
+  const positions = [];
+  const indices = [];
+  // Center vertex
+  positions.push(0, 0, 0);
+  // Concentric rings: ring index 0 has very small radius (close to center),
+  // ring index `rings` sits at `radius`. Each ring has `sides` verts.
+  for (let r = 1; r <= rings; r++) {
+    const rr = (r / rings) * radius;
+    for (let s = 0; s < sides; s++) {
+      const a = (s / sides) * TAU;
+      positions.push(Math.cos(a) * rr, Math.sin(a) * rr, 0);
+    }
+  }
+  // Triangles fan from center to ring 1
+  for (let s = 0; s < sides; s++) {
+    const a = 1 + s;
+    const b = 1 + ((s + 1) % sides);
+    indices.push(0, a, b);
+  }
+  // Stitched rings
+  for (let r = 0; r < rings - 1; r++) {
+    const base0 = 1 + r * sides;
+    const base1 = 1 + (r + 1) * sides;
+    for (let s = 0; s < sides; s++) {
+      const a = base0 + s;
+      const b = base0 + ((s + 1) % sides);
+      const c = base1 + s;
+      const d = base1 + ((s + 1) % sides);
+      indices.push(a, c, b);
+      indices.push(b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function buildRingGeometry(rInner, rOuter, sides, rings) {
+  const positions = [];
+  const indices = [];
+  // (rings+1) concentric rings of verts from rInner to rOuter.
+  for (let r = 0; r <= rings; r++) {
+    const rr = rInner + (r / rings) * (rOuter - rInner);
+    for (let s = 0; s < sides; s++) {
+      const a = (s / sides) * TAU;
+      positions.push(Math.cos(a) * rr, Math.sin(a) * rr, 0);
+    }
+  }
+  for (let r = 0; r < rings; r++) {
+    const base0 = r * sides;
+    const base1 = (r + 1) * sides;
+    for (let s = 0; s < sides; s++) {
+      const a = base0 + s;
+      const b = base0 + ((s + 1) % sides);
+      const c = base1 + s;
+      const d = base1 + ((s + 1) % sides);
+      indices.push(a, c, b);
+      indices.push(b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
 }
 
 function mapSurface(type) {

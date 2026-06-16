@@ -1,14 +1,66 @@
-// cannon-es world for golf. Fixed timestep accumulator. Includes simple air drag
-// (Cd~0.47) and Magnus side-force from spin so we get a fade/draw on offline strikes.
+// cannon-es world for golf. Fixed timestep accumulator with realistic dimpled-ball
+// aerodynamics: dimpled drag (Cd ~ 0.24), separate spin-driven lift coefficient
+// (the thing that lets a real golf ball hang in the air far longer than a thrown
+// rock), and exponential spin decay over the flight.
+//
+// Air density is parameterized: setAir({ tempC, humidity, altitudeM }) lets the
+// engine model thin mountain air or muggy summer afternoons. Default sea-level
+// 20°C / 50% RH / 0m gives rho ≈ 1.204 kg/m^3.
 
 import * as CANNON from 'cannon-es';
 
-const BALL_RADIUS = 0.0213;     // real golf ball
+const BALL_RADIUS = 0.0213;     // real golf ball (m)
 const BALL_MASS = 0.0459;       // kg
-const AIR_DENSITY = 1.225;      // kg/m^3
-const Cd = 0.47;                // drag coefficient (smooth sphere ~0.47; real ball is lower with dimples but feels ok)
 const FRONTAL_AREA = Math.PI * BALL_RADIUS * BALL_RADIUS;
-const MAGNUS_K = 0.00012;       // tuned for visible draw/fade without nuking flight
+
+// ---- Aerodynamic coefficients ----
+// Cd_DIMPLED: dimpled golf ball at PGA-tour Re (~1.5e5). Smooth-sphere Cd ~ 0.47;
+// dimples drop it to ~0.24-0.27 at flight Re. We use a mild speed-dependent ramp
+// (very low speeds skirt the laminar/turbulent transition where drag rises).
+function dragCoefficient(speed) {
+  if (speed < 12) return 0.30;  // sub-Re_critical: more drag
+  if (speed < 25) return 0.27;
+  return 0.24;                   // typical driver-flight Cd
+}
+
+// Cl from spin ratio S = omega * r / |v|. Bearman/Harvey-style saturating curve;
+// caps near 0.30 at S ~ 0.25 (typical driver) and stays flat for high-S short irons.
+// At S=0 (no spin) lift is zero — putters and knock-downs don't float.
+function liftCoefficient(spinRatio) {
+  if (spinRatio < 1e-4) return 0;
+  // Smooth saturating curve: Cl ≈ 1 / (2 + 1/S^0.4). Empirical fit to wind-tunnel
+  // data for dimpled spheres; bounded above by ~0.5 even at unrealistic spin.
+  const s04 = Math.pow(spinRatio, 0.4);
+  return 1 / (2 + 1 / s04);
+}
+
+// Spin decay time constant (seconds). Real golf balls lose ~10-15% of backspin
+// over a 6s flight; tau ~ 20s matches that with exp(-6/20) = 0.74 retention.
+const SPIN_DECAY_TAU = 20;
+
+// Standard-atmosphere reference values for the air-density formula.
+const P0 = 101325;        // Pa (sea level)
+const T0_K = 288.15;      // K (15°C reference; we shift by tempC at evaluation time)
+const R_DRY = 287.058;    // J/(kg·K) dry air
+const R_VAP = 461.495;    // J/(kg·K) water vapor
+const ALT_LAPSE = 0.0065; // K/m
+const P_EXP = 5.2561;     // -g·M/(R·L)
+
+// Saturation vapor pressure (Pa) — Tetens approximation, T in °C.
+function pSat(tempC) {
+  return 610.78 * Math.exp((17.27 * tempC) / (tempC + 237.3));
+}
+
+// rho for moist air at altitude. Defaults: 20°C, 50% RH, 0m → ~1.204 kg/m^3.
+function computeRho({ tempC = 20, humidity = 0.5, altitudeM = 0 } = {}) {
+  const T = tempC + 273.15;
+  // Pressure at altitude (ISA model)
+  const P = P0 * Math.pow(1 - (ALT_LAPSE * altitudeM) / T0_K, P_EXP);
+  // Partial pressures
+  const pv = humidity * pSat(tempC);
+  const pd = Math.max(0, P - pv);
+  return pd / (R_DRY * T) + pv / (R_VAP * T);
+}
 
 export function createPhysics() {
   const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.81, 0) });
@@ -90,11 +142,20 @@ export function createPhysics() {
   }
 
   // Wind state (set per hole). dir is radians in XZ plane; 0 = +Z (with player toward pin).
-  // Drag is computed against (v - wind), which naturally produces head/tail/cross effects.
+  // Drag/lift are computed against (v - wind), which naturally produces head/tail/cross effects.
   const wind = { vec: new CANNON.Vec3(0, 0, 0), speed: 0 };
   function setWind({ speed = 0, dir = 0 } = {}) {
     wind.speed = speed;
     wind.vec.set(Math.sin(dir) * speed, 0, Math.cos(dir) * speed);
+  }
+
+  // Air state. setAir() updates rho for the rest of the round (or until next call).
+  const air = { tempC: 20, humidity: 0.5, altitudeM: 0, rho: computeRho() };
+  function setAir({ tempC, humidity, altitudeM } = {}) {
+    if (Number.isFinite(tempC)) air.tempC = tempC;
+    if (Number.isFinite(humidity)) air.humidity = Math.max(0, Math.min(1, humidity));
+    if (Number.isFinite(altitudeM)) air.altitudeM = altitudeM;
+    air.rho = computeRho({ tempC: air.tempC, humidity: air.humidity, altitudeM: air.altitudeM });
   }
 
   // Green-slope state (set per-hole or when the ball enters the green). (ax, az) is the
@@ -118,14 +179,28 @@ export function createPhysics() {
     ball.applyForce(_slopeForce, ball.position);
   }
 
-  // Per-step aerodynamics on the ball.
+  // Per-step aerodynamics. Three forces act on a flying ball:
+  //   1. Drag: F_d = -0.5 * rho * Cd(v) * A * |vRel| * vRel
+  //   2. Lift: F_l = 0.5 * rho * Cl(S) * A * |vRel|^2 * (omega x vRel) / (|omega| * |vRel|)
+  //              where S = |omega| * r / |vRel| is the spin ratio. The vector
+  //              (omega × vRel) is perpendicular to motion and aligned with the
+  //              Magnus side (backspin → upward, sidespin → side). Normalizing by
+  //              |omega| · |vRel| extracts the unit force direction; we then scale
+  //              by 0.5·rho·Cl·A·|vRel|^2 to get the lift magnitude. Net result:
+  //              lift scales with v^2 (so faster shots get more lift, which is
+  //              what makes drivers fly so high) but the per-step force is bounded
+  //              by Cl_max ~ 0.5, far below anything that destabilizes the
+  //              integrator at our 1/60s dt.
+  //   3. Spin decay: omega exponentially bleeds off (tau ~ 20s).
+  // Wind: drag and lift use vRel = v - wind so head/tail/cross all matter.
   const _drag = new CANNON.Vec3();
   const _vRel = new CANNON.Vec3();
-  const _magnus = new CANNON.Vec3();
-  function applyAerodynamics() {
+  const _lift = new CANNON.Vec3();
+  function applyAerodynamics(dt) {
     if (ball.sleepState === CANNON.Body.SLEEPING) return;
     const v = ball.velocity;
-    // Only apply wind to the ball while it's in flight (above the ground a bit) so
+    const w = ball.angularVelocity;
+    // Only apply wind to the ball while it's in flight (above ground a bit) so
     // a putt isn't pushed sideways by a 6 m/s breeze.
     const inFlight = ball.position.y > BALL_RADIUS * 3 && v.length() > 0.5;
     if (inFlight) {
@@ -135,29 +210,46 @@ export function createPhysics() {
     }
     const relSpeed = _vRel.length();
     if (relSpeed < 0.05) return;
-    // Drag: F = -0.5 * rho * Cd * A * |vRel| * vRel
-    const k = 0.5 * AIR_DENSITY * Cd * FRONTAL_AREA * relSpeed;
-    _drag.set(-_vRel.x * k, -_vRel.y * k, -_vRel.z * k);
+
+    const rho = air.rho;
+    const Cd = dragCoefficient(relSpeed);
+
+    // ---- Drag ----
+    const kd = 0.5 * rho * Cd * FRONTAL_AREA * relSpeed;
+    _drag.set(-_vRel.x * kd, -_vRel.y * kd, -_vRel.z * kd);
     ball.applyForce(_drag, ball.position);
-    // Magnus: F = MAGNUS_K * (omega x vRel).
-    // NOTE: the cross product already carries one factor of |vRel|, so we must NOT
-    // multiply by relSpeed again — doing so makes the force scale with v^2, which at
-    // driver speeds (~67 m/s) produces ~700 m/s^2 and blows up the explicit integrator
-    // into NaN. A single MAGNUS_K scalar is correct and stable.
-    const w = ball.angularVelocity;
-    _magnus.set(
-      w.y * _vRel.z - w.z * _vRel.y,
-      w.z * _vRel.x - w.x * _vRel.z,
-      w.x * _vRel.y - w.y * _vRel.x,
-    );
-    _magnus.scale(MAGNUS_K, _magnus);
-    ball.applyForce(_magnus, ball.position);
+
+    // ---- Lift (spin-driven) ----
+    const omega = w.length();
+    if (omega > 1e-3) {
+      // omega × vRel — perpendicular to motion, in the spin-axis "up" direction.
+      const cx = w.y * _vRel.z - w.z * _vRel.y;
+      const cy = w.z * _vRel.x - w.x * _vRel.z;
+      const cz = w.x * _vRel.y - w.y * _vRel.x;
+      const cmag = Math.sqrt(cx * cx + cy * cy + cz * cz);
+      if (cmag > 1e-6) {
+        const S = (omega * BALL_RADIUS) / relSpeed;
+        const Cl = liftCoefficient(S);
+        if (Cl > 0) {
+          // Lift magnitude (N). Unit direction = cross / cmag. Combine into one scale.
+          const kl = (0.5 * rho * Cl * FRONTAL_AREA * relSpeed * relSpeed) / cmag;
+          _lift.set(cx * kl, cy * kl, cz * kl);
+          ball.applyForce(_lift, ball.position);
+        }
+      }
+
+      // ---- Spin decay (exponential, dt-correct) ----
+      if (dt > 0) {
+        const decay = Math.exp(-dt / SPIN_DECAY_TAU);
+        w.x *= decay; w.y *= decay; w.z *= decay;
+      }
+    }
   }
 
   // Safety net: clamp absurd speeds and reset any non-finite state so a single bad
   // step can never propagate NaN into the renderer/camera.
   const MAX_SPEED = 120;   // m/s — above any real golf ball speed
-  const MAX_SPIN = 600;    // rad/s — clamp angular velocity too (Magnus input)
+  const MAX_SPIN = 1300;   // rad/s — above realistic wedge spin (~12k rpm = 1257 rad/s)
   const MAX_POS = 2000;    // m — no hole is bigger; anything past this is a blow-up
   let _lastSafePos = new CANNON.Vec3(0, BALL_RADIUS, 0);
   function sanitize() {
@@ -190,7 +282,7 @@ export function createPhysics() {
     accumulator += Math.min(dt, 0.1);
     let steps = 0;
     while (accumulator >= FIXED_DT && steps < MAX_SUBSTEPS) {
-      applyAerodynamics();
+      applyAerodynamics(FIXED_DT);
       applyGreenSlope();
       world.step(FIXED_DT);
       sanitize();
@@ -214,6 +306,8 @@ export function createPhysics() {
     addStaticMesh,
     removeStaticBodies,
     setWind,
+    setAir,
+    getAir: () => ({ ...air }),
     setGreenSlope,
     markSafePos,
     step,
