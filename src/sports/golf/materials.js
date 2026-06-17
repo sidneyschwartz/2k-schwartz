@@ -146,9 +146,38 @@ function getCache() {
 
 // ---------- material factories ----------
 
+// ---------- mowed fairway stripes ----------
+//
+// Real fairways are mowed in alternating directions, giving you bright/dark
+// stripes that follow the play direction. We bake this into an onBeforeCompile
+// shader injection on the standard PBR material — keeps PBR + IBL + shadow
+// behaviour, just modulates albedo by a sin() of the world-space coordinate
+// projected onto the fairway axis.
+//
+// The engine calls setFairwayContext({ tee, pin }) once per hole load, BEFORE
+// any fairwayMaterial() calls — that's how the shader picks up the direction.
+
+let _fairwayCtx = {
+  tee: new THREE.Vector2(0, 0),
+  pin: new THREE.Vector2(0, 145),
+};
+const _fairwayMats = new Set();
+
+export function setFairwayContext({ tee, pin } = {}) {
+  if (tee) _fairwayCtx.tee.set(tee.x, tee.z);
+  if (pin) _fairwayCtx.pin.set(pin.x, pin.z);
+  // Push to all live materials so on-hole-change they re-stripe.
+  for (const mat of _fairwayMats) {
+    if (mat.userData?.stripeUniforms) {
+      mat.userData.stripeUniforms.uTee.value.copy(_fairwayCtx.tee);
+      mat.userData.stripeUniforms.uPin.value.copy(_fairwayCtx.pin);
+    }
+  }
+}
+
 export function fairwayMaterial() {
   const c = getCache();
-  return new THREE.MeshStandardMaterial({
+  const mat = new THREE.MeshStandardMaterial({
     map: c.fairwayColor,
     normalMap: c.fairwayNormal,
     normalScale: new THREE.Vector2(0.35, 0.35),
@@ -160,6 +189,64 @@ export function fairwayMaterial() {
     color: 0xffffff,
     envMapIntensity: 0.30,
   });
+
+  // Mowed-stripe injection. Stripes are computed in world-space so they
+  // always run tee → pin regardless of how the terrain mesh is rotated.
+  const stripeUniforms = {
+    uTee:        { value: _fairwayCtx.tee.clone() },
+    uPin:        { value: _fairwayCtx.pin.clone() },
+    uStripeWidth:{ value: 7.5 },        // metres per stripe (one mow-pass width)
+    uStripeStrength: { value: 0.22 },   // 0 = no stripes, 1 = pure two-tone
+    uLightStripe:{ value: new THREE.Color(0x6e9c44) }, // toward sun reflection
+    uDarkStripe: { value: new THREE.Color(0x274826) }, // shadow side of mow
+  };
+  mat.userData.stripeUniforms = stripeUniforms;
+  _fairwayMats.add(mat);
+
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, stripeUniforms);
+    // Pass world XZ to fragment.
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+         varying vec2 vFairwayWorldXZ;`
+      )
+      .replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>
+         vFairwayWorldXZ = worldPosition.xz;`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+         varying vec2 vFairwayWorldXZ;
+         uniform vec2 uTee;
+         uniform vec2 uPin;
+         uniform float uStripeWidth;
+         uniform float uStripeStrength;
+         uniform vec3 uLightStripe;
+         uniform vec3 uDarkStripe;`
+      )
+      // Tint the diffuse albedo by the stripe pattern BEFORE lighting, so
+      // shadow + IBL still work on top of the stripes.
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+         {
+           vec2 dir = normalize(uPin - uTee);
+           float t = dot(vFairwayWorldXZ - uTee, dir);
+           float stripe = sin(t * 3.14159265 / uStripeWidth);
+           // 0=dark, 1=light around the wave; smoothstep softens the seam.
+           float w = smoothstep(-0.4, 0.4, stripe);
+           vec3 stripeColor = mix(uDarkStripe, uLightStripe, w);
+           diffuseColor.rgb = mix(diffuseColor.rgb, stripeColor, uStripeStrength);
+         }`
+      );
+  };
+
+  return mat;
 }
 
 export function roughMaterial() {

@@ -22,7 +22,7 @@ import { mountMinimap } from './minimap.js';
 import { mountSettings, loadSettings } from './settings.js';
 import { applyQuality, getQualityPreset, QUALITY_LEVELS } from './quality.js';
 import { showRoundSummary } from './round-summary.js';
-import { applyMaterial, tickWater } from './materials.js';
+import { applyMaterial, tickWater, setFairwayContext } from './materials.js';
 import { applyVisuals } from './visuals.js';
 import { createGolfer } from './characters.js';
 
@@ -370,6 +370,8 @@ export function mountGolf(host, configOrOnExit) {
     const data = getHole(holeNumber);
     if (activeTerrain) { try { activeTerrain.dispose(); } catch {} activeTerrain = null; }
     disposeDecor();
+    // Stripe the fairway in the tee→pin direction (mowed bands).
+    try { setFairwayContext({ tee: data.tee, pin: data.pin }); } catch {}
     // Materials.js DISPATCHER (water Reflector, elevated greens with cliffs, PBR maps).
     activeTerrain = buildHole(scene, physics, data, { applyMaterial });
     if (_decorateHole) {
