@@ -20,23 +20,23 @@ export const clubs = [
   {
     name: 'Driver',
     loft: deg(11),
-    maxPower: 74,        // m/s ball speed -> ~230m carry
+    maxPower: 76,        // ~230m carry, ~24m apex (penetrating tour-driver flight)
     forgiveness: 0.35,
     sidespinScale: 1.6,
-    backspin: 190,       // ~30 rev/s — low spin, penetrating flight (prevents balloon)
+    backspin: 220,       // ~35 rev/s — low spin for max carry; height comes from loft
   },
   {
     name: '5-Iron',
     loft: deg(20),
-    maxPower: 62,        // ~185m
+    maxPower: 58,        // ~180m
     forgiveness: 0.5,
     sidespinScale: 1.1,
-    backspin: 330,
+    backspin: 340,
   },
   {
     name: '9-Iron',
     loft: deg(37),
-    maxPower: 50,        // ~135m
+    maxPower: 46,        // ~140m
     forgiveness: 0.65,
     sidespinScale: 0.9,
     backspin: 480,
