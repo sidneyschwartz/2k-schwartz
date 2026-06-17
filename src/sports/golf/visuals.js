@@ -195,14 +195,19 @@ function findOrAddSunLight(scene, sunDir) {
     if (!sunLight && o.isDirectionalLight) sunLight = o;
   });
   if (!sunLight) {
-    sunLight = new THREE.DirectionalLight(0xfff2dd, 2.0);
+    // Warmer key light — drifts the broadcast look toward the late-afternoon
+    // "Augusta" feel rather than overcast mid-morning. Slightly higher intensity
+    // to compensate for the deeper grass.
+    sunLight = new THREE.DirectionalLight(0xffe1b0, 2.4);
     scene.add(sunLight);
   }
   // Always ensure a strong-enough ambient fill so foreground ground doesn't go pitch black.
   let hasHemi = false;
   scene.traverse((o) => { if (o.isHemisphereLight) hasHemi = true; });
   if (!hasHemi) {
-    const ambient = new THREE.HemisphereLight(0xcfe2ff, 0x4a6a40, 1.2);
+    // Sky-up tint slightly cooler, ground-up slightly greener — gives the
+    // figure proper rim-light separation from the green carpet.
+    const ambient = new THREE.HemisphereLight(0xb9d0ee, 0x3f6a36, 1.05);
     scene.add(ambient);
   }
   sunLight.position.copy(sunDir).multiplyScalar(SUN_DISTANCE);
@@ -294,9 +299,12 @@ export function applyVisuals(scene, renderer, camera = null) {
     // look on the open fairway.
     try {
       ssaoPass = new SSAOPass(scene, camera, size.x, size.y);
-      ssaoPass.kernelRadius = 0.6;
-      ssaoPass.minDistance = 0.001;
-      ssaoPass.maxDistance = 0.04;
+      // Bumped kernel + a touch more contact AO. The figure + bunker rim now
+      // ground into the terrain instead of floating; the wider kernel doesn't
+      // turn the open fairway dirty because everything there is far apart.
+      ssaoPass.kernelRadius = 0.9;
+      ssaoPass.minDistance = 0.0015;
+      ssaoPass.maxDistance = 0.06;
       ssaoPass.output = SSAOPass.OUTPUT.Default;
       composer.addPass(ssaoPass);
     } catch (err) { console.warn('[visuals] SSAO unavailable', err); }
