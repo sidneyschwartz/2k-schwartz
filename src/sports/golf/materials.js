@@ -99,11 +99,46 @@ function generateGreenMap(size = TEX_SIZE) {
 function generateSandMap(size = TEX_SIZE) {
   const c = makeCanvas(size);
   const ctx = c.getContext('2d');
-  noiseFill(ctx, size, [218, 196, 144], 30);
-  // pebble specks
-  for (let i = 0; i < 200; i++) {
-    ctx.fillStyle = `rgba(120,90,60,${0.2 + Math.random() * 0.3})`;
+  // Warmer "sea sand" beige with finer noise — closer to a maintained bunker
+  // surface than the dirty-yellow original.
+  noiseFill(ctx, size, [232, 210, 160], 20);
+  // Pebble specks (fine grain)
+  for (let i = 0; i < 600; i++) {
+    const a = 0.10 + Math.random() * 0.30;
+    ctx.fillStyle = `rgba(140,110,70,${a})`;
     ctx.fillRect(Math.random() * size, Math.random() * size, 1, 1);
+  }
+  // Rake lines: a band of parallel arcs — the single biggest visual cue that
+  // it's a maintained bunker. We draw a handful of sinuous curves across the
+  // texture; the texture tiles, so the result reads as a continuous rake field.
+  ctx.strokeStyle = 'rgba(160,128,80,0.30)';
+  ctx.lineWidth = 1.2;
+  const lines = 24;
+  for (let i = 0; i < lines; i++) {
+    const yBase = (i / lines) * size + Math.random() * 4 - 2;
+    ctx.beginPath();
+    ctx.moveTo(0, yBase);
+    const segs = 8;
+    for (let s = 1; s <= segs; s++) {
+      const x = (s / segs) * size;
+      const y = yBase + Math.sin(s * 0.9 + i * 0.4) * 1.4;
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  // Subtle highlight on every other rake line so the grooves catch light.
+  ctx.strokeStyle = 'rgba(255,240,200,0.18)';
+  for (let i = 0; i < lines; i += 2) {
+    const yBase = (i / lines) * size + 2;
+    ctx.beginPath();
+    ctx.moveTo(0, yBase);
+    const segs = 8;
+    for (let s = 1; s <= segs; s++) {
+      const x = (s / segs) * size;
+      const y = yBase + Math.sin(s * 0.9 + i * 0.4) * 1.4;
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
   }
   return c;
 }
