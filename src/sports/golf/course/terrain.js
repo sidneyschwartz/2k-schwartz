@@ -445,18 +445,15 @@ function buildRingGeometry(rInner, rOuter, sides, rings) {
 }
 
 function mapSurface(type) {
-  // Tag for cannon contact material lookup. tee/fairway/green roll fast (fairway);
-  // rough and sand resist (rough).
+  // Tag for cannon contact material lookup. Each surface has its own material so
+  // the green checks, the sand plugs, the fairway runs out, and the rough deadens.
   switch (type) {
+    case 'green':   return 'green';
+    case 'sand':    return 'sand';
+    case 'rough':   return 'rough';
     case 'fairway':
-    case 'green':
     case 'tee':
-      return 'fairway';
-    case 'rough':
-    case 'sand':
-      return 'rough';
-    default:
-      return 'fairway';
+    default:        return 'fairway';
   }
 }
 

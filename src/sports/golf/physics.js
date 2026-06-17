@@ -73,16 +73,29 @@ export function createPhysics() {
   world.defaultContactMaterial.contactEquationStiffness = 1e7;
   world.defaultContactMaterial.contactEquationRelaxation = 4;
 
-  // Materials per surface type
+  // Per-surface materials. Greens roll the fastest and barely bounce; fairway is
+  // a hair grippier and has a real bounce; rough deadens; sand plugs.
+  //   friction = sliding/rolling friction in cannon contact
+  //   restitution = bounciness (0 = perfectly plastic, 1 = elastic)
+  // We pick numbers from real-ball-on-turf measurements: green stimp ≈ 10 → ball
+  // rolls a long way at low friction; sand absorbs ~80% of impact energy.
   const fairwayMat = new CANNON.Material('fairway');
   const roughMat = new CANNON.Material('rough');
+  const greenMat = new CANNON.Material('green');
+  const sandMat = new CANNON.Material('sand');
   const ballMat = new CANNON.Material('ball');
 
   world.addContactMaterial(new CANNON.ContactMaterial(ballMat, fairwayMat, {
-    friction: 0.05, restitution: 0.4,
+    friction: 0.05, restitution: 0.40,
+  }));
+  world.addContactMaterial(new CANNON.ContactMaterial(ballMat, greenMat, {
+    friction: 0.03, restitution: 0.25,   // green: smooth roll, low check-bounce
   }));
   world.addContactMaterial(new CANNON.ContactMaterial(ballMat, roughMat, {
-    friction: 0.4, restitution: 0.25,
+    friction: 0.40, restitution: 0.25,
+  }));
+  world.addContactMaterial(new CANNON.ContactMaterial(ballMat, sandMat, {
+    friction: 0.85, restitution: 0.05,   // sand: plugs hard, dead bounce
   }));
 
   // Ball
@@ -128,10 +141,14 @@ export function createPhysics() {
       for (let i = 0; i < posAttr.count; i++) indices[i] = i;
     }
     const shape = new CANNON.Trimesh(vertices, indices);
-    const body = new CANNON.Body({
-      mass: 0,
-      material: surfaceType === 'rough' ? roughMat : fairwayMat,
-    });
+    // Map surfaceType to the cannon Material. Order matters: more-specific tags
+    // override the fairway fallback. terrain.js still passes 'fairway'/'rough'
+    // for fast-roll vs sticky-roll regions; 'green'/'sand' bring the new feel.
+    const mat = surfaceType === 'green' ? greenMat
+              : surfaceType === 'sand' ? sandMat
+              : surfaceType === 'rough' ? roughMat
+              : fairwayMat;
+    const body = new CANNON.Body({ mass: 0, material: mat });
     body.addShape(shape);
     body.position.set(threeMesh.position.x, threeMesh.position.y, threeMesh.position.z);
     body.quaternion.set(
@@ -181,6 +198,148 @@ export function createPhysics() {
     const k = BALL_MASS * 0.6;
     _slopeForce.set(slope.ax * k, 0, slope.az * k);
     ball.applyForce(_slopeForce, ball.position);
+  }
+
+  // Current ball surface — set by the engine each frame based on terrain.lieAt.
+  // Used by the rollout damper, the green-check landing model, and putting feel.
+  let ballSurface = 'fairway';
+  function setBallSurface(s) { ballSurface = s || 'fairway'; }
+  function getBallSurface() { return ballSurface; }
+
+  // Pin position for cup-capture + rim-out. y is the surface height at the pin.
+  // Engine calls setPin({ x, y, z }) per hole.
+  const pin = { x: NaN, y: NaN, z: NaN, set: false };
+  function setPin({ x, y = 0, z } = {}) {
+    if (Number.isFinite(x) && Number.isFinite(z)) {
+      pin.x = x; pin.y = y; pin.z = z; pin.set = true;
+    } else {
+      pin.set = false;
+    }
+  }
+
+  // ---- Surface-aware rollout damper ----
+  //
+  // Cannon's per-material friction handles sliding contact, but the ball still
+  // wants to roll too far on the rough/green without an extra rolling drag. This
+  // function adds a small velocity damping on each step that's tagged by surface.
+  // - green: very light damping (wants to roll a long way at putt speeds)
+  // - fairway: light
+  // - rough: heavier
+  // - sand: VERY heavy (plug)
+  // Damping only applies while the ball is on the ground (low Y, low speed).
+  const ROLL_DAMP = { green: 0.15, fairway: 0.30, rough: 1.40, sand: 3.50, tee: 0.30 };
+  function applyRollout(dt) {
+    if (ball.sleepState === CANNON.Body.SLEEPING) return;
+    const v = ball.velocity;
+    const sp = Math.hypot(v.x, v.z);
+    if (sp < 1e-3) return;
+    const onGround = ball.position.y < BALL_RADIUS * 2.5;
+    if (!onGround) return;
+    const k = ROLL_DAMP[ballSurface] ?? ROLL_DAMP.fairway;
+    // Exponential decay so dt is correct
+    const f = Math.exp(-k * dt);
+    v.x *= f;
+    v.z *= f;
+  }
+
+  // ---- Green-check landing (wedge backspin pulls the ball back) ----
+  //
+  // When a high-spin ball lands on a green at a steep descent angle, the spin
+  // transfers into reverse rolling. We watch for the moment the ball's Y goes
+  // from "in the air" to "rolling": if landing surface is 'green' AND backspin
+  // (component of omega around the side-perp axis) is high AND descent is steep,
+  // reverse the horizontal velocity by a fraction proportional to spin × steepness.
+  let _wasInAir = false;
+  let _prevVy = 0;
+  function applyGreenCheck() {
+    const v = ball.velocity;
+    const y = ball.position.y;
+    const inAir = y > BALL_RADIUS * 3;
+    if (inAir) { _wasInAir = true; _prevVy = v.y; return; }
+    if (!_wasInAir) return;
+    _wasInAir = false;
+    if (ballSurface !== 'green') return;
+
+    // descent steepness: steeper landing = stronger check. Use vy at impact / |vXZ|
+    const vyImpact = -_prevVy;            // positive number now (was negative going down)
+    const hSpeed = Math.hypot(v.x, v.z);
+    if (hSpeed < 0.5 || vyImpact < 1) return;
+    const steepness = Math.min(1.5, vyImpact / hSpeed); // ~1 for wedge, ~0.3 for driver
+
+    const w = ball.angularVelocity;
+    // Backspin = the component of omega perpendicular to the horizontal velocity
+    // direction (the side axis). We approximate: in our convention backspin is set
+    // about the axis (-vZ, 0, vX) at launch, but spin decays — use total omega
+    // magnitude scaled by how aligned it is with horizontal.
+    const omegaH = Math.hypot(w.x, w.z);
+    if (omegaH < 50) return;
+    // Check force: scales with steepness * (omegaH / typical_wedge_spin)
+    const spinFactor = Math.min(1.5, omegaH / 600);
+    const checkFactor = Math.min(0.85, 0.55 * steepness * spinFactor);
+    // Reverse horizontal velocity by checkFactor, and zero vertical bounce-back
+    // so the ball doesn't pogo on a hard check.
+    v.x *= -checkFactor;
+    v.z *= -checkFactor;
+    v.y *= 0.3;
+  }
+
+  // ---- Cup attraction + rim-out ----
+  //
+  // On slopes the 11cm cup is a tiny target; balls rolling 2 m/s within an inch
+  // of the edge would otherwise miss every time. We add a soft attraction toward
+  // the cup when the ball is slow + close, scaling with proximity so it's not
+  // arcade-magnetic. Outside this window we model rim-out: a fast ball clipping
+  // the cup lip deflects off rather than dropping.
+  const CUP_RADIUS = 0.054;                 // standard cup is 4.25", radius 0.054m
+  const CUP_GIMME_RADIUS = CUP_RADIUS * 2.8; // ~15cm — within this + slow, attract
+  const CUP_RIMOUT_RADIUS = CUP_RADIUS * 1.3;
+  const CUP_SLOW_SPEED = 1.5;               // m/s
+  const CUP_RIMOUT_SPEED = 2.5;             // m/s
+  const _toCup = new CANNON.Vec3();
+  function applyCupCapture(dt) {
+    if (!pin.set) return;
+    if (ball.sleepState === CANNON.Body.SLEEPING) return;
+    if (ballSurface !== 'green') return;
+    const v = ball.velocity;
+    const speed = v.length();
+    const dx = pin.x - ball.position.x;
+    const dz = pin.z - ball.position.z;
+    const dist = Math.hypot(dx, dz);
+    const onGround = ball.position.y < pin.y + BALL_RADIUS * 4;
+    if (!onGround) return;
+
+    // ---- Rim-out: fast ball clipping the cup lip deflects ----
+    if (dist > CUP_RADIUS && dist < CUP_RIMOUT_RADIUS && speed > CUP_RIMOUT_SPEED) {
+      // Push the ball perpendicular to its velocity, away from the cup center.
+      // Magnitude scales with overlap into the rim-out band.
+      const overlap = (CUP_RIMOUT_RADIUS - dist) / (CUP_RIMOUT_RADIUS - CUP_RADIUS);
+      const hSpeed = Math.max(0.5, Math.hypot(v.x, v.z));
+      // Tangent vector to velocity in XZ (rotate 90°)
+      const tx = -v.z / hSpeed, tz = v.x / hSpeed;
+      // Direction away from cup, projected onto tangent
+      const awayX = -dx / Math.max(0.001, dist);
+      const awayZ = -dz / Math.max(0.001, dist);
+      const sign = tx * awayX + tz * awayZ >= 0 ? 1 : -1;
+      const kick = overlap * hSpeed * 0.6;
+      v.x += sign * tx * kick;
+      v.z += sign * tz * kick;
+      return;
+    }
+
+    // ---- Cup gimme: slow ball near the cup gets a soft pull ----
+    if (dist > CUP_RADIUS && dist < CUP_GIMME_RADIUS && speed < CUP_SLOW_SPEED) {
+      // Acceleration toward cup, scaled by (1 - dist/GIMME) and slow-speed factor
+      const proximity = 1 - (dist - CUP_RADIUS) / (CUP_GIMME_RADIUS - CUP_RADIUS);
+      const slow = 1 - speed / CUP_SLOW_SPEED;
+      const accelMag = 1.6 * proximity * slow;  // m/s² toward cup
+      const inv = 1 / Math.max(0.001, dist);
+      _toCup.set(dx * inv * accelMag, 0, dz * inv * accelMag);
+      // Apply as force = mass * a
+      ball.applyForce(
+        new CANNON.Vec3(_toCup.x * BALL_MASS, 0, _toCup.z * BALL_MASS),
+        ball.position,
+      );
+    }
   }
 
   // Per-step aerodynamics. Three forces act on a flying ball:
@@ -291,6 +450,11 @@ export function createPhysics() {
     while (accumulator >= FIXED_DT && steps < MAX_SUBSTEPS) {
       applyAerodynamics(FIXED_DT);
       applyGreenSlope();
+      applyRollout(FIXED_DT);
+      applyCupCapture(FIXED_DT);
+      // Green-check evaluates BEFORE world.step so the impulse hits the
+      // velocity we'll integrate this frame, not next.
+      applyGreenCheck();
       world.step(FIXED_DT);
       sanitize();
       accumulator -= FIXED_DT;
@@ -316,10 +480,14 @@ export function createPhysics() {
     setAir,
     getAir: () => ({ ...air }),
     setGreenSlope,
+    setBallSurface,
+    getBallSurface,
+    setPin,
     markSafePos,
     step,
     dispose,
     BALL_RADIUS,
-    materials: { fairwayMat, roughMat, ballMat },
+    CUP_RADIUS,
+    materials: { fairwayMat, roughMat, greenMat, sandMat, ballMat },
   };
 }
