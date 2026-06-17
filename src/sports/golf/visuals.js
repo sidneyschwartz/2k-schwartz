@@ -185,9 +185,10 @@ export function applyVisuals(scene, renderer, camera = null) {
     console.warn('[visuals] PMREM IBL failed; PBR will use sun+ambient only', err);
   }
 
-  // Mild fog for distance haze; matches sky horizon. Pushed back so a 145m par-3
-  // doesn't disappear into white.
-  scene.fog = new THREE.Fog(0xbcd4e6, 400, 1400);
+  // Mild fog for distance haze; matches sky horizon. Pushed WAY back so the
+  // fairway stays crisp green out to the 500m+ par-5 green. Original 400-1400
+  // had haze creeping over the mid-fairway and making it look washed-out.
+  scene.fog = new THREE.Fog(0xbcd4e6, 700, 2000);
   if (!scene.background) scene.background = new THREE.Color(0x87b6e0);
 
   // Post-processing.

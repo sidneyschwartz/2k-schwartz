@@ -338,26 +338,30 @@ function buildWaterPlane(width, depth, { sunDir = new THREE.Vector3(0.5, 1, 0.5)
 }
 
 // Cheap fallback (used by low-quality / when Water class fails for some reason).
-function buildReflectorWater(width, depth, resolution = 1024) {
+function buildReflectorWater(width, depth, resolution = 512) {
+  // Darker reflector tint so the reflected sky doesn't blow out highlights.
   const geo = new THREE.PlaneGeometry(width, depth);
   const reflector = new Reflector(geo, {
     clipBias: 0.003,
     textureWidth: resolution,
     textureHeight: resolution,
-    color: 0x4477aa,
+    color: 0x0e2238,
   });
   reflector.rotateX(-Math.PI / 2);
   _reflectors.add(reflector);
 
+  // Heavy tint plane on top to mute the reflection. Opacity bumped to 0.85
+  // and color deepened so the lake reads as deep water from any angle.
   const tintGeo = new THREE.PlaneGeometry(width, depth);
   const tintMat = new THREE.MeshStandardMaterial({
-    color: 0x2a6db5,
+    color: 0x0e3a5c,
     transparent: true,
-    opacity: 0.55,
-    roughness: 0.15,
+    opacity: 0.85,
+    roughness: 0.35,
     metalness: 0.0,
     normalMap: getWaterNormalTexture(),
-    normalScale: new THREE.Vector2(0.5, 0.5),
+    normalScale: new THREE.Vector2(0.6, 0.6),
+    envMapIntensity: 0.20,
   });
   const tint = new THREE.Mesh(tintGeo, tintMat);
   tint.rotateX(-Math.PI / 2);
