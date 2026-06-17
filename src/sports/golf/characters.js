@@ -220,8 +220,10 @@ function buildGolfer(preset) {
   root.name = `golfer-${preset.name}`;
 
   // Hips group sits at hip height; everything else hangs off this.
+  // baseX = neutral lateral hip position; pose hipShift adds onto it.
   const hips = new THREE.Group();
-  hips.position.y = hipsY;
+  hips.position.set(0, hipsY, 0);
+  hips.userData.baseX = 0;
   root.add(hips);
 
   // ---------- legs ----------
@@ -440,12 +442,68 @@ function buildGolfer(preset) {
     hand.position.y = -foreArm;
     elbow.add(hand);
 
+    // Real golfers wear a glove on the lead hand (left for a right-handed
+    // golfer). White matte leather reads instantly as "golfer" at distance.
+    const isLead = side < 0;
+    const handColor = isLead ? 0xf2f2f2 : preset.skin;
+    const handRough = isLead ? 0.95 : 0.6;
+
+    // Palm — slightly smaller than before so the fingers can sit on top.
     const palm = new THREE.Mesh(
-      roundedBox(headSize * 0.32, headSize * 0.20, headSize * 0.16, 0.03),
-      mat(preset.skin, 0.6),
+      roundedBox(headSize * 0.30, headSize * 0.16, headSize * 0.14, 0.03),
+      mat(handColor, handRough),
     );
+    palm.position.y = -headSize * 0.02;
     palm.castShadow = true;
     hand.add(palm);
+
+    // Knuckles ridge (a slightly raised band at the front of the palm) — gives
+    // the silhouette a real "fist around the grip" read instead of a smooth box.
+    const knuckles = new THREE.Mesh(
+      roundedBox(headSize * 0.30, headSize * 0.06, headSize * 0.06, 0.02),
+      mat(handColor, handRough * 0.9),
+    );
+    knuckles.position.set(0, -headSize * 0.09, headSize * 0.05);
+    knuckles.castShadow = true;
+    hand.add(knuckles);
+
+    // Four fingers wrapped down around the grip — short cylinders curved
+    // toward the club shaft (which runs through gripPivot below the hands).
+    const fingerR = headSize * 0.035;
+    const fingerL = headSize * 0.13;
+    for (let f = 0; f < 4; f++) {
+      const fx = (f - 1.5) * headSize * 0.075;
+      const finger = new THREE.Mesh(
+        new THREE.CylinderGeometry(fingerR, fingerR * 0.85, fingerL, 6),
+        mat(handColor, handRough),
+      );
+      // Rotate so the finger curls forward and down (around the imaginary
+      // grip in front of the palm).
+      finger.rotation.x = 0.65;
+      finger.position.set(fx, -headSize * 0.18, headSize * 0.06);
+      finger.castShadow = true;
+      hand.add(finger);
+    }
+
+    // Thumb running along the top of the grip (more vertical).
+    const thumb = new THREE.Mesh(
+      new THREE.CylinderGeometry(fingerR * 0.95, fingerR * 0.75, fingerL * 0.85, 6),
+      mat(handColor, handRough),
+    );
+    thumb.rotation.x = 0.25;
+    thumb.rotation.z = isLead ? 0.45 : -0.45;
+    thumb.position.set(headSize * (isLead ? 0.12 : -0.12), -headSize * 0.10, headSize * 0.05);
+    thumb.castShadow = true;
+    hand.add(thumb);
+
+    // Wrist band (subtle) — softens the forearm/hand junction.
+    const wrist = new THREE.Mesh(
+      new THREE.TorusGeometry(headSize * 0.13, headSize * 0.025, 6, 12),
+      mat(handColor, handRough),
+    );
+    wrist.rotation.x = Math.PI / 2;
+    wrist.position.y = headSize * 0.06;
+    hand.add(wrist);
 
     return { shoulder, elbow, hand };
   }
@@ -491,8 +549,18 @@ function roundedBox(w, h, d, radius = 0.05) {
 // space) at ~mid-shin height. We rotate around Y for spine twist, X for forward
 // lean. Knees / elbows get a slight per-state bend.
 
+// Real-golf-swing posture cues per phase:
+//   hipY     — hip rotation (separate from shoulder turn for X-factor)
+//   hipShift — lateral weight shift (positive = toward trail leg)
+//   torsoY   — shoulder rotation (bigger than hip turn)
+//   torsoX   — spine forward bend
+//   armsX/Y  — overall arm swing through plane
+//   elbowL/R — wrist hinge proxy (lead extends, trail folds)
+//   kneeL/R  — flex (trail loads in backswing, lead flex through impact)
+//   headY    — chin-stays-back; rotate slightly opposite of shoulders
 const POSES = {
   idle: {
+    hipY: 0,          hipShift: 0,
     torsoY: 0,        torsoX: 0,
     armsX: 0.08,      armsY: 0,
     elbowL: 0.25,     elbowR: 0.25,
@@ -501,6 +569,7 @@ const POSES = {
     headX: 0,         headY: 0,
   },
   address: {
+    hipY: 0,          hipShift: 0,
     torsoY: 0.08,     torsoX: 0.42,
     armsX: 0.95,      armsY: 0.05,
     elbowL: 0.15,     elbowR: 0.15,
@@ -509,30 +578,38 @@ const POSES = {
     headX: 0.30,      headY: 0.05,
   },
   backswing: {
+    // Hip turn is about half the shoulder turn — that's the X-factor.
+    hipY: -0.70,      hipShift: 0.06,
     torsoY: -1.50,    torsoX: 0.20,
     armsX: -1.30,     armsY: 0.25,
     elbowL: 0.05,     elbowR: 1.40,
     gripX: 0,         clubRot: -1.80,
-    kneeL: 0.18,      kneeR: 0.30,
+    // Trail knee LOADS (more flex); lead knee straightens.
+    kneeL: 0.10,      kneeR: 0.38,
     headX: 0.25,      headY: -0.30,
   },
   downswing: {
+    // Hips clear FIRST (open more than shoulders) — classic kinematic sequence.
+    hipY: 0.60,       hipShift: -0.08,
     torsoY: 0.25,     torsoX: 0.30,
     armsX: 0.95,      armsY: 0.10,
     elbowL: 0.10,     elbowR: 0.30,
     gripX: 0,         clubRot: 0.20,
-    kneeL: 0.22,      kneeR: 0.22,
+    kneeL: 0.30,      kneeR: 0.18,
     headX: 0.35,      headY: 0.0,
   },
   follow: {
+    hipY: 1.10,       hipShift: -0.10,
     torsoY: 1.65,     torsoX: 0.05,
     armsX: 1.40,      armsY: -0.10,
     elbowL: 1.50,     elbowR: 0.20,
     gripX: 0,         clubRot: 1.60,
-    kneeL: 0.10,      kneeR: 0.05,
+    // Weight fully on lead leg; trail heel up.
+    kneeL: 0.08,      kneeR: 0.02,
     headX: -0.05,     headY: 0.30,
   },
   reset: {
+    hipY: 0,          hipShift: 0,
     torsoY: 0,        torsoX: 0,
     armsX: 0.08,      armsY: 0,
     elbowL: 0.25,     elbowR: 0.25,
@@ -561,6 +638,9 @@ function ease(t, kind) {
 function lerp(a, b, t) { return a + (b - a) * t; }
 
 function applyPose(parts, pose) {
+  // Hip turn + weight shift drive the kinematic chain.
+  parts.hips.rotation.y = pose.hipY ?? 0;
+  parts.hips.position.x = (parts.hips.userData.baseX ?? 0) + (pose.hipShift ?? 0);
   parts.torsoPivot.rotation.y = pose.torsoY;
   parts.torsoPivot.rotation.x = pose.torsoX;
   parts.armsPivot.rotation.x = pose.armsX;
@@ -577,6 +657,8 @@ function applyPose(parts, pose) {
 
 function readPose(parts) {
   return {
+    hipY: parts.hips.rotation.y,
+    hipShift: parts.hips.position.x - (parts.hips.userData.baseX ?? 0),
     torsoY: parts.torsoPivot.rotation.y,
     torsoX: parts.torsoPivot.rotation.x,
     armsX: parts.armsPivot.rotation.x,
@@ -628,17 +710,26 @@ export function createGolfer({ character = 'tiger' } = {}) {
     if (!isFinite(dt) || dt <= 0) return;
     if (state === 'idle') {
       idleClock += dt;
-      const sway = Math.sin(idleClock * 1.4) * 0.04;
+      // Two-frequency mix gives a more organic, less-mechanical idle waggle.
+      const sway = Math.sin(idleClock * 1.4) * 0.04 + Math.sin(idleClock * 0.55) * 0.015;
       const bob = Math.sin(idleClock * 2.0) * 0.012;
       const breathe = Math.sin(idleClock * 1.6) * 0.008;
+      // Subtle club waggle — anchored at the gripPivot, mimics the
+      // "tap-tap-tap" waggle a real golfer does before address.
+      const waggle = Math.sin(idleClock * 2.4) * 0.06
+                   + Math.sin(idleClock * 5.1 + 1.0) * 0.025;
       parts.torsoPivot.rotation.y = sway;
       parts.torsoPivot.rotation.x = 0.03 + bob;
       parts.armsPivot.rotation.x = 0.08 + Math.sin(idleClock * 1.4) * 0.025;
+      parts.gripPivot.rotation.x = waggle * 0.5;
+      parts.club.rotation.x = waggle;
       parts.headGroup.rotation.y = Math.sin(idleClock * 0.7) * 0.10;
       parts.headGroup.position.y = parts.headGroup.userData.baseY ?? 0;
-      // Slight weight shift on the legs
+      // Slight weight shift on the legs + chest breathing
       parts.legL.knee.rotation.x = 0.10 + breathe;
       parts.legR.knee.rotation.x = 0.10 - breathe;
+      // Hip micro-shift so the golfer isn't standing perfectly statue-still.
+      parts.hips.position.x = (parts.hips.userData.baseX ?? 0) + Math.sin(idleClock * 0.9) * 0.012;
       return;
     }
     elapsed += dt;
