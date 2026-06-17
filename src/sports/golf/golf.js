@@ -393,6 +393,8 @@ export function mountGolf(host, configOrOnExit) {
     pinWorld.copy(activeTerrain.pinWorld);
     pinTarget.position.copy(pinWorld);
     physics.setWind?.(data.wind ?? { speed: 0, dir: 0 });
+    // Tell the physics layer where the cup is so the gimme/rim-out logic engages.
+    physics.setPin?.({ x: pinWorld.x, y: pinWorld.y, z: pinWorld.z });
     // Per-hole deterministic green break. Stored here but ONLY applied while the ball
     // is actually on the green (see tick loop) — applying it everywhere made the ball
     // roll off the tee on its own.
@@ -1278,6 +1280,13 @@ export function mountGolf(host, configOrOnExit) {
       if (!swing.state.putting) swing.setPutting(true);
     } else if (swing.state.phase === 'idle' && !ballOnGreen && swing.state.putting) {
       swing.setPutting(false);
+    }
+
+    // Tell physics what surface is under the ball each step so green-check (backspin
+    // pulls the ball back on landing) and sand-plug engage with the right material.
+    if (physics.setBallSurface) {
+      const p = physics.ball.position;
+      physics.setBallSurface(lieAt(p.x, p.z, game.holeData));
     }
 
     swing.update(dt);
