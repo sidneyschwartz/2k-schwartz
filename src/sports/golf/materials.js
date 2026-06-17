@@ -146,6 +146,145 @@ function getCache() {
 
 // ---------- material factories ----------
 
+// ---------- detailed pin assembly ----------
+//
+// Replaces the engine's basic cylinder+triangle with: chromed flagstick,
+// segmented cloth flag that waves in the wind via vertex shader, hole number
+// on the flag. Returns a Group the engine can drop at pinWorld.
+
+const _pinMaterials = new Set();
+
+export function createPinAssembly({ holeNumber = 1, wind = 1.0 } = {}) {
+  const group = new THREE.Group();
+  group.name = 'pin-assembly';
+
+  // ---- flagstick (white pole with red base sleeve, taper at top) ----
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.014, 0.018, 2.2, 8),
+    new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.45, metalness: 0.10 }),
+  );
+  pole.position.y = 1.1;
+  pole.castShadow = true;
+  group.add(pole);
+
+  // Red sleeve at the base (the rubber boot that protects the green)
+  const sleeve = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.025, 0.030, 0.15, 12),
+    new THREE.MeshStandardMaterial({ color: 0x8a1f1f, roughness: 0.7 }),
+  );
+  sleeve.position.y = 0.10;
+  sleeve.castShadow = true;
+  group.add(sleeve);
+
+  // Brass cap on top
+  const cap = new THREE.Mesh(
+    new THREE.SphereGeometry(0.022, 12, 10),
+    new THREE.MeshStandardMaterial({ color: 0xc8a045, roughness: 0.35, metalness: 0.85 }),
+  );
+  cap.position.y = 2.22;
+  cap.castShadow = true;
+  group.add(cap);
+
+  // ---- cloth flag — subdivided plane with wave animation ----
+  const flagW = 0.55;
+  const flagH = 0.38;
+  const flagGeo = new THREE.PlaneGeometry(flagW, flagH, 16, 6);
+  // Anchor pivot at left edge so the flag waves away from the pole.
+  flagGeo.translate(flagW / 2, 0, 0);
+
+  // Procedural flag texture: red field + white hole number circle.
+  const flagTex = makeFlagTexture(holeNumber);
+
+  const flagMat = new THREE.MeshStandardMaterial({
+    map: flagTex,
+    color: 0xffffff,
+    side: THREE.DoubleSide,
+    roughness: 0.9,
+    metalness: 0.0,
+    envMapIntensity: 0.4,
+  });
+
+  // Wave injection — vertex shader displacement along Z based on X (distance
+  // from pole) and time. Stronger displacement near the trailing edge.
+  flagMat.userData.flagUniforms = {
+    uTime: { value: 0 },
+    uWind: { value: wind },
+  };
+  flagMat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, flagMat.userData.flagUniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+         uniform float uTime;
+         uniform float uWind;`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+         {
+           // x∈[0, flagW] after our translate above. Treat as 0..1 for the wave.
+           float u = clamp(transformed.x / 0.55, 0.0, 1.0);
+           float wave = sin(u * 6.28318 + uTime * 5.0) * 0.08
+                      + sin(u * 3.0   + uTime * 3.2) * 0.04;
+           // Lateral droop scales by u² so the leading edge stays pinned.
+           transformed.z += wave * uWind * u * u;
+           transformed.y += sin(u * 4.0 + uTime * 2.0) * 0.015 * uWind * u;
+         }`
+      );
+  };
+
+  const flag = new THREE.Mesh(flagGeo, flagMat);
+  flag.position.set(0, 1.95, 0);
+  flag.castShadow = true;
+  flag.receiveShadow = false;
+  group.add(flag);
+
+  _pinMaterials.add(flagMat);
+  return group;
+}
+
+function makeFlagTexture(holeNumber) {
+  const size = 256;
+  const c = makeCanvas(size);
+  const ctx = c.getContext('2d');
+  // Background: rich red flag
+  ctx.fillStyle = '#d23030';
+  ctx.fillRect(0, 0, size, size);
+  // Subtle weave noise so the cloth doesn't look perfectly flat
+  for (let i = 0; i < 1200; i++) {
+    const a = 0.04 + Math.random() * 0.06;
+    ctx.fillStyle = `rgba(0,0,0,${a})`;
+    ctx.fillRect(Math.random() * size, Math.random() * size, 2, 1);
+  }
+  // White circle with hole number
+  ctx.fillStyle = '#f5f5f5';
+  ctx.beginPath();
+  ctx.arc(size * 0.62, size * 0.5, size * 0.27, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#c91414';
+  ctx.font = `bold ${Math.floor(size * 0.38)}px system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(holeNumber), size * 0.62, size * 0.51);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// Engine calls this each frame so the flag waves.
+export function tickPin(dt, { wind = 1.0 } = {}) {
+  for (const mat of _pinMaterials) {
+    const u = mat.userData?.flagUniforms;
+    if (!u) continue;
+    u.uTime.value += dt;
+    u.uWind.value = Math.max(0.4, Math.min(2.5, wind));
+  }
+}
+
 // ---------- mowed fairway stripes ----------
 //
 // Real fairways are mowed in alternating directions, giving you bright/dark

@@ -22,7 +22,10 @@ import { mountMinimap } from './minimap.js';
 import { mountSettings, loadSettings } from './settings.js';
 import { applyQuality, getQualityPreset, QUALITY_LEVELS } from './quality.js';
 import { showRoundSummary } from './round-summary.js';
-import { applyMaterial, tickWater, setFairwayContext } from './materials.js';
+import { applyMaterial, tickWater, setFairwayContext, createPinAssembly, tickPin } from './materials.js';
+// Expose the detailed pin assembly globally so terrain.js can pick it up
+// without importing materials.js directly (avoids a chunk dep).
+if (typeof globalThis !== 'undefined') globalThis.__golfPinFactory = createPinAssembly;
 import { applyVisuals } from './visuals.js';
 import { createGolfer } from './characters.js';
 
@@ -1364,6 +1367,7 @@ export function mountGolf(host, configOrOnExit) {
     if (golfer?.update) golfer.update(dt);
     audio.tickAmbient(dt);
     try { tickWater(dt); } catch {}
+    try { tickPin(dt, { wind: (game.wind?.speed ?? 4) * 0.25 }); } catch {}
     if (activeDecor?.tick) {
       try {
         activeDecor.tick(dt, {

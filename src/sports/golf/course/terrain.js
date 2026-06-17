@@ -296,23 +296,36 @@ export function buildHole(scene, physics, holeData, { applyMaterial } = {}) {
   const pinTerrainH = heightAt(holeData.pin.x, holeData.pin.z, holeData);
   const pinWorld = new THREE.Vector3(holeData.pin.x, Y.green + pinTerrainH, holeData.pin.z);
 
-  const pinGroup = new THREE.Group();
-  const poleGeo = new THREE.CylinderGeometry(0.015, 0.015, 2.2, 8);
-  const poleMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
-  const pole = new THREE.Mesh(poleGeo, poleMat);
-  pole.position.y = 1.1;
-  pole.castShadow = true;
-  pinGroup.add(pole);
-  const flagShape = new THREE.BufferGeometry();
-  flagShape.setAttribute('position', new THREE.Float32BufferAttribute([
-    0, 2.1, 0,
-    0.6, 1.9, 0,
-    0, 1.7, 0,
-  ], 3));
-  flagShape.setIndex([0, 1, 2]);
-  flagShape.computeVertexNormals();
-  const flagMat = new THREE.MeshStandardMaterial({ color: 0xd23030, side: THREE.DoubleSide });
-  pinGroup.add(new THREE.Mesh(flagShape, flagMat));
+  // Detailed pin assembly: chrome pole + cloth flag with wave animation.
+  // Falls back to a simple cylinder+triangle if materials.js doesn't export it.
+  let pinGroup;
+  try {
+    // Resolved lazily so terrain.js doesn't bring materials.js into its chunk.
+    const m = globalThis.__golfPinFactory;
+    pinGroup = m
+      ? m({ holeNumber: holeData.number, wind: (holeData.wind?.speed ?? 4) * 0.25 })
+      : null;
+  } catch { pinGroup = null; }
+  if (!pinGroup) {
+    pinGroup = new THREE.Group();
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.015, 0.015, 2.2, 8),
+      new THREE.MeshStandardMaterial({ color: 0xffffff }),
+    );
+    pole.position.y = 1.1;
+    pole.castShadow = true;
+    pinGroup.add(pole);
+    const flagShape = new THREE.BufferGeometry();
+    flagShape.setAttribute('position', new THREE.Float32BufferAttribute([
+      0, 2.1, 0, 0.6, 1.9, 0, 0, 1.7, 0,
+    ], 3));
+    flagShape.setIndex([0, 1, 2]);
+    flagShape.computeVertexNormals();
+    pinGroup.add(new THREE.Mesh(
+      flagShape,
+      new THREE.MeshStandardMaterial({ color: 0xd23030, side: THREE.DoubleSide }),
+    ));
+  }
   pinGroup.position.copy(pinWorld);
   group.add(pinGroup);
 
