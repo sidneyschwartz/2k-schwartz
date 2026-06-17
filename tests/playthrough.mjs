@@ -46,25 +46,28 @@ for (let h = 1; h <= HOLES_TO_PLAY; h++) {
   const start = await ctl('_state');
   console.log(`\n--- Hole ${start.hole} (strokes ${start.strokes}) ---`);
 
-  // Take 3 shots of decreasing power toward the pin, sampling during each flight.
-  for (const power of [0.85, 0.5, 0.3]) {
-    await ctl('_debugShoot', { power, aimYaw: 0 });
-    for (let i = 0; i < 8; i++) {
-      await page.waitForTimeout(250);
-      await sampleFinite(`hole${start.hole} flight p=${power}`);
-    }
+  // Fire one real shot to exercise flight + camera (sampling finite throughout). We wait
+  // for it to settle (inFlight=false) before the next action so the inFlight guard on
+  // launchShot doesn't no-op subsequent calls.
+  await ctl('_debugShoot', { power: 0.85, aimYaw: 0 });
+  for (let i = 0; i < 24; i++) {
+    await page.waitForTimeout(200);
+    const s = await sampleFinite(`hole${start.hole} flight`);
+    if (s && !s.inFlight) break;
   }
 
-  // Force the hole-out and watch the transition + flyover.
+  // Force the hole-out, then POLL for the hole index to advance (advance takes ~4.6s:
+  // 1800ms hole-complete delay + 2800ms flyover). Polling is robust to timing.
   await ctl('_debugSink');
-  for (let i = 0; i < 16; i++) {
-    await page.waitForTimeout(250);
-    await sampleFinite(`hole${start.hole} transition`);
+  let after = start;
+  for (let i = 0; i < 40; i++) {            // up to 8s
+    await page.waitForTimeout(200);
+    after = await sampleFinite(`hole${start.hole} transition`);
+    if (after && after.hole > start.hole) break;
   }
 
-  const after = await ctl('_state');
-  holeResults.push({ from: start.hole, to: after.hole, completedBefore: start.hole });
-  console.log(`  after sink+transition → now on hole ${after.hole}, cam=${JSON.stringify(after.cam)} finite=${after.finite}`);
+  holeResults.push({ from: start.hole, to: after.hole });
+  console.log(`  after sink → now on hole ${after.hole}, finite=${after.finite}`);
 }
 
 await page.screenshot({ path: 'tests/playthrough-final.png' });

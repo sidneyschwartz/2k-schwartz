@@ -829,6 +829,26 @@ export function mountGolf(host, configOrOnExit) {
     resetBtn.style.display = 'none';
   }
 
+  // Snap the ball into the cup and run the hole-complete flow. Called by the cup
+  // sensor and by _debugSink (so the test holes out deterministically even on a
+  // contoured green where a placed ball would otherwise roll off the cup).
+  function holeOut() {
+    if (game.complete) return;
+    physics.ball.velocity.set(0, 0, 0);
+    physics.ball.angularVelocity.set(0, 0, 0);
+    physics.ball.position.set(pinWorld.x, pinWorld.y - 0.1, pinWorld.z);
+    physics.ball.sleep();
+    game.complete = true;
+    game.inFlight = false;
+    audio.play('ball_roll', { speed: 0 });
+    audio.play('ball_in_hole');
+    trail.stop();
+    onHoleComplete();
+    completeBanner.innerHTML = `Hole ${game.hole} <small style="opacity:0.7">${game.holeName || ''}</small><br/>complete in ${game.strokes} stroke${game.strokes === 1 ? '' : 's'}`;
+    completeBanner.style.display = 'block';
+    resetBtn.style.display = 'inline-block';
+  }
+
   function onHoleComplete() {
     // For solo / vs-CPU, record locally — the server isn't in the loop.
     // For multiplayer, the server is authoritative; we only write into our slot via the
@@ -1371,19 +1391,7 @@ export function mountGolf(host, configOrOnExit) {
       const nearGround = bp.y < pinWorld.y + physics.BALL_RADIUS * 5;
       // Strict cup: must be inside the real cup radius AND not blasting through too fast.
       if (distXZ < CUP_CATCH_RADIUS && nearGround && speed < CUP_PUTT_SPEED_LIMIT) {
-        // Snap to bottom of cup
-        physics.ball.velocity.set(0, 0, 0);
-        physics.ball.angularVelocity.set(0, 0, 0);
-        physics.ball.position.set(pinWorld.x, pinWorld.y - 0.1, pinWorld.z);
-        game.complete = true;
-        game.inFlight = false;
-        audio.play('ball_roll', { speed: 0 });
-        audio.play('ball_in_hole');
-        trail.stop();
-        onHoleComplete();
-        completeBanner.innerHTML = `Hole ${game.hole} <small style="opacity:0.7">${game.holeName || ''}</small><br/>complete in ${game.strokes} stroke${game.strokes === 1 ? '' : 's'}`;
-        completeBanner.style.display = 'block';
-        resetBtn.style.display = 'inline-block';
+        holeOut();
       }
     }
 
@@ -1467,13 +1475,9 @@ export function mountGolf(host, configOrOnExit) {
       launchShot({ club: swing.club, power, accuracyError: 0, aimYaw, stance: { x: 0, y: 0 } });
     },
     _debugSink() {
-      // Drop the ball straight into the cup at low speed to trigger the hole-out path.
-      physics.ball.velocity.set(0, 0, 0);
-      physics.ball.angularVelocity.set(0, 0, 0);
-      physics.ball.position.set(pinWorld.x, pinWorld.y + physics.BALL_RADIUS, pinWorld.z);
-      physics.markSafePos?.(pinWorld.x, pinWorld.y + physics.BALL_RADIUS, pinWorld.z);
-      physics.ball.wakeUp();
-      game.inFlight = true; // let the cup sensor catch it on the next frames
+      // Deterministically hole out (don't rely on the cup sensor — on contoured
+      // greens a placed ball rolls off the cup before the sensor catches it).
+      holeOut();
     },
     _state() {
       const p = physics.ball.position;
