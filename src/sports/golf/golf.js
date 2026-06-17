@@ -1377,6 +1377,7 @@ export function mountGolf(host, configOrOnExit) {
     audio.tickAmbient(dt);
     try { tickWater(dt); } catch {}
     try { tickPin(dt, { wind: (game.wind?.speed ?? 4) * 0.25 }); } catch {}
+    try { visuals?.tickSky?.(dt); } catch {}
     if (activeDecor?.tick) {
       try {
         activeDecor.tick(dt, {

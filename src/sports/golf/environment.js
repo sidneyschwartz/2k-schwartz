@@ -602,10 +602,215 @@ function addTeeSign(scene, holeData) {
 // `opts` may include { sunDir, fogColor, fogNear, fogFar, wind } to seed the
 // grass shader. The engine should call `env.tick(dt, { ballPos, cameraPos })`
 // each frame so the grass patch follows the ball and the wind animates.
+// ---------- yardage markers ----------
+// Small painted stones at 100/150/200y from the pin, set along the hole axis
+// just outside the fairway. Real golf tournaments use sprinkler-head markers;
+// stones read clearly at game distance.
+
+function addYardageMarkers(scene, holeData) {
+  const group = new THREE.Group();
+  group.name = 'yardage-markers';
+  const dx = holeData.pin.x - holeData.tee.x;
+  const dz = holeData.pin.z - holeData.tee.z;
+  const len = Math.hypot(dx, dz) || 1;
+  const fx = dx / len, fz = dz / len;
+  // perpendicular (right-hand side of the fairway)
+  const px = -fz, pz = fx;
+
+  const colors = {
+    100: 0xd84444,  // red = 100
+    150: 0xe6d24a,  // yellow = 150
+    200: 0x5f9bd8,  // blue = 200
+  };
+  // y = distance from the pin (in meters; we treat 1y ≈ 0.914m so 100y ≈ 91m)
+  for (const yds of [100, 150, 200]) {
+    const m = yds * 0.9144;
+    if (m > len - 6) continue; // too close to tee, skip
+    const x = holeData.pin.x - fx * m + px * 12; // 12m to the right of the line
+    const z = holeData.pin.z - fz * m + pz * 12;
+    const stone = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.25, 0.30, 0.30, 12),
+      new THREE.MeshStandardMaterial({ color: colors[yds], roughness: 0.6 }),
+    );
+    stone.position.set(x, 0.15, z);
+    stone.castShadow = true;
+    stone.receiveShadow = true;
+    // Painted top stripe (white band) — sells the markers as official.
+    const band = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.26, 0.26, 0.05, 12),
+      new THREE.MeshStandardMaterial({ color: 0xf5f5f5, roughness: 0.5 }),
+    );
+    band.position.set(x, 0.32, z);
+    band.castShadow = true;
+    group.add(stone, band);
+  }
+  scene.add(group);
+  return group;
+}
+
+// ---------- cart path ----------
+// Strip of concrete along the side of the hole. Three-segment polyline so it
+// follows the fairway gently rather than running straight.
+
+function addCartPath(scene, holeData) {
+  const dx = holeData.pin.x - holeData.tee.x;
+  const dz = holeData.pin.z - holeData.tee.z;
+  const len = Math.hypot(dx, dz) || 1;
+  if (len < 80) return null; // skip on short par-3s
+  const fx = dx / len, fz = dz / len;
+  const px = -fz, pz = fx;
+  const sideOffset = 16; // metres right of the fairway line
+
+  // 4 control points; jitter slightly so the path bends a little.
+  const pts = [];
+  for (let t of [0.05, 0.35, 0.65, 0.92]) {
+    const cx = holeData.tee.x + fx * len * t + px * (sideOffset + (Math.random() - 0.5) * 2);
+    const cz = holeData.tee.z + fz * len * t + pz * (sideOffset + (Math.random() - 0.5) * 2);
+    pts.push(new THREE.Vector3(cx, 0, cz));
+  }
+  // Build a ribbon (extruded along the spline) at width 1.6m.
+  const path = new THREE.CatmullRomCurve3(pts);
+  const segs = 64;
+  const positions = new Float32Array((segs + 1) * 2 * 3);
+  const indices = [];
+  const halfW = 0.8;
+  for (let i = 0; i <= segs; i++) {
+    const u = i / segs;
+    const p = path.getPoint(u);
+    const t = path.getTangent(u).normalize();
+    const r = new THREE.Vector3(-t.z, 0, t.x).normalize();
+    positions[i * 6]     = p.x + r.x * halfW;
+    positions[i * 6 + 1] = 0.02;
+    positions[i * 6 + 2] = p.z + r.z * halfW;
+    positions[i * 6 + 3] = p.x - r.x * halfW;
+    positions[i * 6 + 4] = 0.02;
+    positions[i * 6 + 5] = p.z - r.z * halfW;
+    if (i < segs) {
+      const a = i * 2, b = a + 1, c = a + 2, d = a + 3;
+      indices.push(a, b, c, b, d, c);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xa8a59c,
+    roughness: 0.95,
+    metalness: 0.0,
+    envMapIntensity: 0.30,
+  });
+  const ribbon = new THREE.Mesh(geo, mat);
+  ribbon.receiveShadow = true;
+  ribbon.castShadow = false;
+  ribbon.name = 'cart-path';
+  scene.add(ribbon);
+  return ribbon;
+}
+
+// ---------- gallery ropes ----------
+// Knee-high white posts joined by a sagging rope on both sides of the fairway,
+// only near the tee + green (where galleries actually stand at a tournament).
+
+function addGalleryRopes(scene, holeData) {
+  const group = new THREE.Group();
+  group.name = 'gallery-ropes';
+  const dx = holeData.pin.x - holeData.tee.x;
+  const dz = holeData.pin.z - holeData.tee.z;
+  const len = Math.hypot(dx, dz) || 1;
+  if (len < 60) return group; // not enough room to bother
+  const fx = dx / len, fz = dz / len;
+  const px = -fz, pz = fx;
+
+  function rope(startT, endT, side) {
+    const sideOffset = 18 * side;
+    const postGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.0, 6);
+    const postMat = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.6 });
+    // 4 posts per segment
+    const N = 4;
+    const positions = [];
+    for (let i = 0; i <= N; i++) {
+      const u = startT + (endT - startT) * (i / N);
+      const cx = holeData.tee.x + fx * len * u + px * sideOffset;
+      const cz = holeData.tee.z + fz * len * u + pz * sideOffset;
+      const post = new THREE.Mesh(postGeo, postMat);
+      post.position.set(cx, 0.5, cz);
+      post.castShadow = true;
+      group.add(post);
+      positions.push(new THREE.Vector3(cx, 0.6, cz));
+    }
+    // Rope as a line (cheap, reads clean at distance).
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(positions);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xeeeeee });
+    group.add(new THREE.Line(lineGeo, lineMat));
+  }
+  // Near-tee gallery (0 → 18% of hole length, both sides)
+  rope(0.02, 0.18, -1);
+  rope(0.02, 0.18,  1);
+  // Near-green gallery (82% → 100% of hole length)
+  rope(0.82, 0.98, -1);
+  rope(0.82, 0.98,  1);
+  scene.add(group);
+  return group;
+}
+
+// ---------- distant clubhouse + treeline ----------
+// A small clubhouse silhouette far behind the tee, plus a thin treeline far
+// past the green. Both rendered with simple low-poly geometry that reads as
+// "tournament setting" at distance.
+
+function addClubhouse(scene, holeData) {
+  const group = new THREE.Group();
+  group.name = 'clubhouse-silhouette';
+  const dx = holeData.pin.x - holeData.tee.x;
+  const dz = holeData.pin.z - holeData.tee.z;
+  const len = Math.hypot(dx, dz) || 1;
+  const fx = dx / len, fz = dz / len;
+  // Place the clubhouse 80m BEHIND the tee, slightly offset to the right.
+  const cx = holeData.tee.x - fx * 80 - fz * 40;
+  const cz = holeData.tee.z - fz * 80 + fx * 40;
+
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0xf2efe5, roughness: 0.85 });
+  const roofMat = new THREE.MeshStandardMaterial({ color: 0x5a2f24, roughness: 0.8 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x6b4a30, roughness: 0.85 });
+
+  // Main building (16m wide, 8m tall, 9m deep)
+  const main = new THREE.Mesh(new THREE.BoxGeometry(16, 8, 9), wallMat);
+  main.position.set(cx, 4, cz);
+  main.castShadow = true;
+  main.receiveShadow = true;
+  group.add(main);
+  // Pitched roof
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(12, 5, 4), roofMat);
+  roof.position.set(cx, 10, cz);
+  roof.rotation.y = Math.PI / 4;
+  roof.castShadow = true;
+  group.add(roof);
+  // Side wing (8m × 5m × 7m)
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(8, 5, 7), wallMat);
+  wing.position.set(cx + 12, 2.5, cz + 1);
+  wing.castShadow = true;
+  group.add(wing);
+  const wingRoof = new THREE.Mesh(new THREE.ConeGeometry(6, 3, 4), roofMat);
+  wingRoof.position.set(cx + 12, 6.5, cz + 1);
+  wingRoof.rotation.y = Math.PI / 4;
+  group.add(wingRoof);
+  // Porch column row (just a strip of dark wood)
+  const porch = new THREE.Mesh(new THREE.BoxGeometry(16, 0.5, 1.5), trimMat);
+  porch.position.set(cx, 0.25, cz + 5);
+  group.add(porch);
+  scene.add(group);
+  return group;
+}
+
 export function decorateHole(scene, holeData, opts = {}) {
   const trees = scatterTrees(scene, holeData);
   const rocks = scatterRocks(scene, holeData);
   const sign = addTeeSign(scene, holeData);
+  const yardage = addYardageMarkers(scene, holeData);
+  const cartPath = addCartPath(scene, holeData);
+  const galleryRopes = addGalleryRopes(scene, holeData);
+  const clubhouse = addClubhouse(scene, holeData);
 
   // Instanced grass patch around the ball. Uses InstancedMesh — one draw call
   // for up to several thousand blades. Frustum-culled by its bounding sphere.
@@ -706,10 +911,21 @@ export function decorateHole(scene, holeData, opts = {}) {
         mat.dispose?.();
       }
     }
+    // Course dressing groups — traverse + dispose to free their per-hole assets.
+    for (const g of [yardage, cartPath, galleryRopes, clubhouse]) {
+      if (!g) continue;
+      if (g.parent) scene.remove(g);
+      g.traverse?.((o) => {
+        o.geometry?.dispose?.();
+        const mat = o.material;
+        if (mat?.map) mat.map.dispose?.();
+        mat?.dispose?.();
+      });
+    }
   }
 
   return {
-    trees, rocks, sign, grass,
+    trees, rocks, sign, grass, yardage, cartPath, galleryRopes, clubhouse,
     tick,
     setGrassDensity,
     setTreeDensity,

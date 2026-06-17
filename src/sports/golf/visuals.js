@@ -100,7 +100,92 @@ function addSky(scene) {
 
   const sun = sunVector();
   u.sunPosition.value.copy(sun);
-  return { sky, sun };
+
+  // Cloud dome: a thin hemispherical shell above the play area with a
+  // procedural multi-octave noise sampled in the FRAGMENT shader, so we get
+  // soft, slow-drifting cumulus without billions of polys. Renders BEFORE the
+  // scene so PMREM (which only grabs the Sky for IBL) is unaffected.
+  const cloudGeo = new THREE.SphereGeometry(2400, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2);
+  const cloudMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    uniforms: {
+      uTime: { value: 0 },
+      uSunDir: { value: sun.clone() },
+      uCloudColor: { value: new THREE.Color(0xffffff) },
+      uSkyTint: { value: new THREE.Color(0x9ec6ea) },
+      uCoverage: { value: 0.42 }, // 0 = clear blue, 1 = total overcast
+      uSoftness: { value: 0.18 },
+    },
+    vertexShader: /* glsl */`
+      varying vec3 vWorldDir;
+      void main() {
+        vWorldDir = normalize((modelMatrix * vec4(position, 1.0)).xyz);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      varying vec3 vWorldDir;
+      uniform float uTime;
+      uniform vec3 uSunDir;
+      uniform vec3 uCloudColor;
+      uniform vec3 uSkyTint;
+      uniform float uCoverage;
+      uniform float uSoftness;
+
+      // value-noise basics
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float vnoise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), u.x),
+                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+      }
+      float fbm(vec2 p) {
+        float s = 0.0, a = 0.5;
+        for (int k = 0; k < 5; k++) {
+          s += a * vnoise(p);
+          p *= 2.13;
+          a *= 0.5;
+        }
+        return s;
+      }
+
+      void main() {
+        // Discard everything below horizon — only render the upper hemisphere.
+        if (vWorldDir.y < 0.02) discard;
+
+        // Project the view direction onto a 2D plane far above; drift over time.
+        vec2 uv = vWorldDir.xz / max(0.05, vWorldDir.y);
+        uv = uv * 0.6 + vec2(uTime * 0.005, uTime * 0.003);
+
+        float n = fbm(uv * 1.2);
+        // Coverage threshold + softness — squashes noise into puffy clouds.
+        float cloud = smoothstep(1.0 - uCoverage - uSoftness, 1.0 - uCoverage + uSoftness, n);
+
+        // Fade clouds near the horizon so they don't poke through trees.
+        float horizonFade = smoothstep(0.04, 0.18, vWorldDir.y);
+        cloud *= horizonFade;
+
+        // Cheap lighting — directional sun gives the cloud tops a warm rim.
+        float sunCos = clamp(dot(vWorldDir, normalize(uSunDir)), 0.0, 1.0);
+        vec3 lit = mix(uSkyTint, uCloudColor, 0.85);
+        lit += vec3(0.10, 0.06, 0.0) * pow(sunCos, 8.0);
+
+        gl_FragColor = vec4(lit, cloud * 0.85);
+      }
+    `,
+  });
+  const clouds = new THREE.Mesh(cloudGeo, cloudMat);
+  clouds.position.y = 200;
+  clouds.frustumCulled = false;
+  clouds.renderOrder = -1; // draw before the rest of the scene
+  scene.add(clouds);
+
+  return { sky, sun, clouds };
 }
 
 function findOrAddSunLight(scene, sunDir) {
@@ -160,7 +245,7 @@ export function applyVisuals(scene, renderer, camera = null) {
   renderer.physicallyCorrectLights = true;
 
   // Sky + sun.
-  const { sky, sun } = addSky(scene);
+  const { sky, sun, clouds } = addSky(scene);
   const sunDir = sun.clone().normalize();
   const sunLight = findOrAddSunLight(scene, sunDir);
 
@@ -275,6 +360,11 @@ export function applyVisuals(scene, renderer, camera = null) {
     sunLight,
     sunDirection: sunDir,
     envMap: pmremRT?.texture ?? null,
+    clouds,
+    // Engine should call tickSky(dt) every frame so clouds drift.
+    tickSky(dt) {
+      if (clouds?.material?.uniforms?.uTime) clouds.material.uniforms.uTime.value += dt;
+    },
     render,
     setSize,
     setSunTarget,
