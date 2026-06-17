@@ -242,13 +242,27 @@ export function mountGolf(host, configOrOnExit) {
   // ---- Physics ----
   const physics = createPhysics();
 
-  // Ball mesh
+  // Ball mesh. The real golf ball is only 2.1cm radius — far too small to see at the
+  // 6-12m chase-camera distance. Render it ~3.5x larger (visual only; physics still
+  // uses the real radius). Emissive so it stays visible in shadow and against the sky.
+  const BALL_VISUAL_RADIUS = physics.BALL_RADIUS * 3.5;
   const ballMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(physics.BALL_RADIUS, 24, 16),
-    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 }),
+    new THREE.SphereGeometry(BALL_VISUAL_RADIUS, 24, 16),
+    new THREE.MeshStandardMaterial({
+      color: 0xffffff, roughness: 0.35, metalness: 0.0,
+      emissive: 0xffffff, emissiveIntensity: 0.25,
+    }),
   );
   ballMesh.castShadow = true;
   scene.add(ballMesh);
+
+  // A subtle always-on-top halo ring so the ball never fully disappears in flight
+  // against bright sky or busy terrain.
+  const ballHalo = new THREE.Mesh(
+    new THREE.SphereGeometry(BALL_VISUAL_RADIUS * 1.6, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.18, depthWrite: false }),
+  );
+  ballMesh.add(ballHalo);
 
   // Aim line
   const aimGeo = new THREE.BufferGeometry();
@@ -457,6 +471,7 @@ export function mountGolf(host, configOrOnExit) {
 
   function launchShot({ club, power, accuracyError, aimYaw, stance, isPutt: isPuttFlag }) {
     if (game.complete) return;
+    if (game.inFlight) return;                 // can't hit a ball that's still moving
     if (isMultiplayer && !game.localActive) return;
     if (hasCpu && game.cpuPhase !== 'player') return;
 
@@ -1301,11 +1316,24 @@ export function mountGolf(host, configOrOnExit) {
           game.settleTimer = 0;
           audio.play('ball_roll', { speed: 0 });
           trail.stop();
+          // Hard-stop the ball so it doesn't keep micro-rolling down the contoured
+          // terrain forever ("drifting"). It stays put until the next shot.
+          physics.ball.velocity.set(0, 0, 0);
+          physics.ball.angularVelocity.set(0, 0, 0);
+          physics.ball.sleep();
           onBallSettled(bp);
         }
       } else {
         game.settleTimer = 0;
       }
+    }
+
+    // Belt-and-braces: whenever we're NOT in flight and NOT replaying, keep the ball
+    // asleep & zeroed so a resting ball on a slope can never drift while you line up.
+    if (!game.inFlight && !replay.playing && !game.complete) {
+      const v = physics.ball.velocity;
+      if (v.lengthSquared() > 1e-4) { v.set(0, 0, 0); physics.ball.angularVelocity.set(0, 0, 0); }
+      if (physics.ball.sleepState !== 2 /* SLEEPING */) physics.ball.sleep();
     }
 
     // Trail + tracer + ambient wind + water ripples + golfer animation + grass.

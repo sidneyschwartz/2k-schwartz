@@ -52,14 +52,15 @@ function noiseFill(ctx, size, baseRGB, variance) {
 function generateFairwayMap(size = TEX_SIZE) {
   const c = makeCanvas(size);
   const ctx = c.getContext('2d');
-  // base mowed green with two-tone stripes
-  noiseFill(ctx, size, [78, 132, 56], 24);
+  // Mowed green with two-tone stripes. Deepened base + darker bright-stripe
+  // so the env-lit fairway reads as Augusta turf rather than a sunlit highlight.
+  noiseFill(ctx, size, [58, 100, 42], 18);
   const stripeH = size / 8;
   ctx.globalAlpha = 0.18;
   for (let y = 0; y < size; y += stripeH * 2) {
-    ctx.fillStyle = '#3e6f3a';
+    ctx.fillStyle = '#2c5028';
     ctx.fillRect(0, y, size, stripeH);
-    ctx.fillStyle = '#9ac96a';
+    ctx.fillStyle = '#6a9a4a';
     ctx.fillRect(0, y + stripeH, size, stripeH);
   }
   ctx.globalAlpha = 1;
@@ -83,11 +84,12 @@ function generateRoughMap(size = TEX_SIZE) {
 function generateGreenMap(size = TEX_SIZE) {
   const c = makeCanvas(size);
   const ctx = c.getContext('2d');
-  noiseFill(ctx, size, [110, 168, 80], 14);
-  // very subtle cross-mowing
+  // Deepened to read as a manicured green under bright IBL — the old
+  // (110, 168, 80) was washing out to white-green near the sun.
+  noiseFill(ctx, size, [82, 132, 60], 10);
   ctx.globalAlpha = 0.06;
   for (let y = 0; y < size; y += 16) {
-    ctx.fillStyle = '#86b85a';
+    ctx.fillStyle = '#6a9648';
     ctx.fillRect(0, y, size, 8);
   }
   ctx.globalAlpha = 1;
@@ -150,9 +152,13 @@ export function fairwayMaterial() {
     map: c.fairwayColor,
     normalMap: c.fairwayNormal,
     normalScale: new THREE.Vector2(0.35, 0.35),
-    roughness: 0.85,
+    // Maxed roughness so the env map can't put a bright sky-coloured sheen on
+    // the grass. envMapIntensity tames the IBL contribution further — the
+    // PMREM-baked sky is bright and was washing the fairway to near-white.
+    roughness: 1.0,
     metalness: 0.0,
     color: 0xffffff,
+    envMapIntensity: 0.30,
   });
 }
 
@@ -162,8 +168,9 @@ export function roughMaterial() {
     map: c.roughColor,
     normalMap: c.roughNormal,
     normalScale: new THREE.Vector2(0.9, 0.9),
-    roughness: 0.95,
+    roughness: 1.0,
     metalness: 0.0,
+    envMapIntensity: 0.30,
   });
 }
 
@@ -173,8 +180,11 @@ export function greenMaterial() {
     map: c.greenColor,
     normalMap: c.greenNormal,
     normalScale: new THREE.Vector2(0.15, 0.15),
-    roughness: 0.7,
+    // Greens are still smoother (slight sheen on a real putting surface), but
+    // tamed envMap so the highlight doesn't blow out near the cup.
+    roughness: 0.85,
     metalness: 0.0,
+    envMapIntensity: 0.35,
   });
 }
 
@@ -186,6 +196,7 @@ export function sandMaterial() {
     normalScale: new THREE.Vector2(0.6, 0.6),
     roughness: 1.0,
     metalness: 0.0,
+    envMapIntensity: 0.45,
   });
 }
 
@@ -305,19 +316,23 @@ const _waters = new Set();
 
 function buildWaterPlane(width, depth, { sunDir = new THREE.Vector3(0.5, 1, 0.5).normalize() } = {}) {
   const geo = new THREE.PlaneGeometry(width, depth, 1, 1);
+  // sunColor toned WAY down — at Lakeside we look straight into the reflected
+  // sun and the original 0xfff4d6 blew out to pure white across half the
+  // screen. Dim the sun reflection AND deepen the base water so the lake
+  // reads as deep water, not a mirror.
   const water = new Water(geo, {
     textureWidth: 512,
     textureHeight: 512,
     waterNormals: getWavesNormalTexture(),
     sunDirection: sunDir.clone(),
-    sunColor: 0xfff4d6,
-    waterColor: 0x1a5a8a,
-    distortionScale: 2.2,
+    sunColor: 0x7d8a6a,
+    waterColor: 0x0e3a5c,
+    distortionScale: 1.2,
     fog: true,
     alpha: 0.95,
   });
   water.rotation.x = -Math.PI / 2;
-  water.material.uniforms.size.value = 6.0;
+  water.material.uniforms.size.value = 4.0;
   _waters.add(water);
   return water;
 }
@@ -433,18 +448,15 @@ export function applyMaterial(surfaceType, mesh, region = null) {
   if (!mesh) return mesh;
 
   if (surfaceType === 'water') {
-    // Try the real three.js Water class first (sun glint + animated normals +
-    // proper screen-space reflections). Fall back to the Reflector if Water
-    // construction throws.
+    // We had the real three.js Water class here for the sun-glint reflection,
+    // but on shots where the camera looks straight INTO the reflected sun
+    // (Lakeside tee, low-angle approach) it blew out to near-white across half
+    // the screen even with darkened sunColor. The Reflector path with a
+    // translucent tint plane gives a properly deep-blue lake at every angle
+    // and still looks reflective.
     const width = region?.w ?? 50;
     const depth = region?.d ?? 50;
-    let waterMesh = null;
-    try {
-      waterMesh = buildWaterPlane(width, depth);
-    } catch (err) {
-      console.warn('[materials] Water class failed; falling back to Reflector', err);
-      waterMesh = buildReflectorWater(width, depth, 1024);
-    }
+    const waterMesh = buildReflectorWater(width, depth, 512);
     mesh.visible = false;
     waterMesh.position.set(0, 0.01, 0);
     mesh.add(waterMesh);

@@ -23,11 +23,11 @@ const SUN_DISTANCE = 450;
 const ColorGradeShader = {
   uniforms: {
     tDiffuse:    { value: null },
-    uShadowLift: { value: 0.008 },    // very subtle floor raise
-    uMidWarm:    { value: 0.015 },    // gentle warmth in midtones (sunlit feel)
-    uSaturation: { value: 1.08 },     // mild saturation pop
-    uContrast:   { value: 1.04 },     // gentle S-curve
-    uVignette:   { value: 0.12 },     // soft edge darkening
+    uShadowLift: { value: 0.005 },    // very subtle floor raise
+    uMidWarm:    { value: 0.012 },    // very gentle warmth in midtones
+    uSaturation: { value: 1.18 },     // bigger saturation pop — recovers the green after exposure cut
+    uContrast:   { value: 1.06 },     // slightly stronger S-curve
+    uVignette:   { value: 0.14 },     // soft edge darkening
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -148,7 +148,11 @@ function findOrAddSunLight(scene, sunDir) {
 export function applyVisuals(scene, renderer, camera = null) {
   // Renderer-side polish.
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  // Reduced from 1.05 to keep grass surfaces from blowing out under the
+  // PMREM-sky IBL contribution. Combined with envMapIntensity ≈ 0.3 on the
+  // surface materials this lands the fairway in the rich-green zone instead
+  // of pale whitish-green.
+  renderer.toneMappingExposure = 1.0;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
