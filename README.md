@@ -2,6 +2,10 @@
 
 Multi-sport game by the Schwartz brothers. Current focus: **Golf MVP** (Wii Golf meets 2K Golf — realistic 3D, 18 holes, online multiplayer, Tiger Woods & Jalen Brunson).
 
+> ### 🎾 Wilson — start your tennis game here → [`src/sports/tennis/START_HERE.md`](src/sports/tennis/START_HERE.md)
+> Run `npm run dev`, open http://localhost:3000, click **Tennis**. Your sandbox is the whole
+> `src/sports/tennis/` folder. Golf (`src/sports/golf/`) is Sid's — use it as a reference.
+
 ---
 
 ## Quick start (local, two windows)
